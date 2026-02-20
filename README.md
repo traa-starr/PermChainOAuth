@@ -1,54 +1,62 @@
 # PermChainOAuth
 
-## Project Overview
-Decentralized OAuth for crypto wallets with verifiable receipts—empowering self-sovereign permissions in Web3/AI.
+Decentralized OAuth for crypto wallets with verifiable on-chain permission receipts.
 
-PermChainOAuth is a decentralized wallet OAuth system where users grant and revoke app permissions through signed wallet interactions. Permission decisions are anchored on-chain as verifiable receipts, enabling transparent and auditable authorization for both Web3 and AI-native applications.
-
-## Installation
-1. Clone the repository:
+## Quickstart
+1. **Clone and enter the repo (root directory):**
    ```bash
    git clone https://github.com/traa-starr/PermChainOAuth.git
    cd PermChainOAuth
    ```
-2. Install dependencies:
+2. **Install dependencies (root directory):**
    ```bash
    npm install
    ```
-3. Copy environment variables:
+3. **Create `.env` safely (root directory):**
    ```bash
-   cp .env.example .env
+   npm run setup
    ```
-4. Start the development environment:
+   - This command is cross-platform (works on Windows/macOS/Linux).
+   - It is idempotent: if `.env` already exists, it does nothing.
+4. **Compile contracts (root directory):**
    ```bash
-   npm run dev
+   npm run compile
    ```
+
+## Smart Contracts (Hardhat)
+All contract commands below run from the **repository root**.
+
+- Run tests:
+  ```bash
+  npm test
+  ```
+- Start a local Hardhat JSON-RPC node:
+  ```bash
+  npm run node
+  ```
+- Deploy to an in-process Hardhat network (single command):
+  ```bash
+  npm run deploy:local
+  ```
+- Deploy to a running local node (start `npm run node` first in another terminal):
+  ```bash
+  npm run deploy:localhost
+  ```
+
+## Frontend
+This repository currently includes React source files under `src/`, but it does **not** include a complete frontend build/dev-server configuration in the root project scripts yet.
+
+Because of that, there is no supported `npm run dev` or `npm start` frontend command in this repo at this time.
 
 ## Usage
-1. Connect a crypto wallet in the React frontend.
-2. Request OAuth-like permissions for an app or agent.
-3. Sign the permission grant transaction.
-4. Store and verify on-chain permission receipts.
-5. Use receipts to validate authorization in downstream services.
+1. Deploy the `PermissionReceipt` contract.
+2. Use the deployed contract address/ABI in your client integration.
+3. Mint permission receipts and verify/revoke on-chain as needed.
 
 ## Tech Stack
-- **React** for the frontend UI and wallet interaction flows.
-- **Solidity** for smart contracts managing permission receipts.
-- **viem** for Ethereum JSON-RPC interactions and contract calls.
-- **OpenZeppelin** for secure contract primitives and access patterns.
-
-## Contributing
-Contributions are welcome.
-
-1. Fork the repository.
-2. Create a feature branch:
-   ```bash
-   git checkout -b feat/your-feature
-   ```
-3. Commit your changes and push your branch.
-4. Open a Pull Request describing your changes and motivation.
-
-Please keep changes focused, add tests when applicable, and update documentation as needed.
+- Hardhat
+- Solidity
+- OpenZeppelin Contracts
 
 ## License
 This project is licensed under the MIT License. See [LICENSE](./LICENSE) for details.
