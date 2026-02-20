@@ -1,3 +1,9 @@
+ codex/create-hardhat-files-for-permissionreceipt-contract
+node_modules/
+artifacts/
+cache/
+.env
+
 # Node.js dependencies
 node_modules/
 
@@ -49,3 +55,4 @@ Thumbs.db
 # Misc
 tmp/
 temp/
+ main

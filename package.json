@@ -1,4 +1,20 @@
 {
+ codex/create-hardhat-files-for-permissionreceipt-contract
+  "name": "permchain-oauth",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "deploy:local": "hardhat run scripts/deploy.js"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.10"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.2"
+
   "name": "permchain-oauth-frontend",
   "version": "0.1.0",
   "private": true,
@@ -22,5 +38,6 @@
     "webpack": "^5.95.0",
     "webpack-cli": "^5.1.4",
     "webpack-dev-server": "^5.1.0"
+ main
   }
 }
