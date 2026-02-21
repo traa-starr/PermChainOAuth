@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 
 contract PermissionReceipt is ERC721URIStorage {
     error NotGranter();
     error Soulbound();
+    error InvalidGranterCaller();
+    error InactivePermission();
+    error PermissionExpired();
 
     struct Receipt {
         address granter;
         address grantee;
         string scope;
+        string proofHash;
         uint256 issuedAt;
+        uint256 expiresAt;
         uint256 revokedAt;
         bool active;
     }
@@ -25,7 +29,9 @@ contract PermissionReceipt is ERC721URIStorage {
         address indexed granter,
         address indexed grantee,
         string scope,
-        string tokenURI
+        string tokenURI,
+        string proofHash,
+        uint256 expiresAt
     );
 
     event ReceiptRevoked(
@@ -38,25 +44,46 @@ contract PermissionReceipt is ERC721URIStorage {
     constructor() ERC721("PermissionReceipt", "PRCPT") {}
 
     function mint(
+        address granter,
         address to,
         string calldata scope,
-        string calldata metadataURI
-    ) external returns (uint256 tokenId) {
+        string calldata metadataURI,
+        string calldata proofHash,
+        uint256 expiresAt
+    ) public returns (uint256 tokenId) {
+        if (granter != msg.sender) {
+            revert InvalidGranterCaller();
+        }
+
         tokenId = _nextTokenId++;
 
         _safeMint(to, tokenId);
         _setTokenURI(tokenId, metadataURI);
 
         receipts[tokenId] = Receipt({
-            granter: msg.sender,
+            granter: granter,
             grantee: to,
             scope: scope,
+            proofHash: proofHash,
             issuedAt: block.timestamp,
+            expiresAt: expiresAt,
             revokedAt: 0,
             active: true
         });
 
-        emit ReceiptMinted(tokenId, msg.sender, to, scope, metadataURI);
+        emit ReceiptMinted(tokenId, granter, to, scope, metadataURI, proofHash, expiresAt);
+    }
+
+    function getPermission(uint256 tokenId) external view returns (Receipt memory receipt) {
+        receipt = receipts[tokenId];
+
+        if (!receipt.active) {
+            revert InactivePermission();
+        }
+
+        if (receipt.expiresAt != 0 && block.timestamp > receipt.expiresAt) {
+            revert PermissionExpired();
+        }
     }
 
     function revoke(uint256 tokenId) external {
@@ -66,7 +93,6 @@ contract PermissionReceipt is ERC721URIStorage {
             revert NotGranter();
         }
 
-        // ownerOf() reverts if token doesn't exist, which is acceptable here.
         address currentOwner = ownerOf(tokenId);
 
         receipt.active = false;
@@ -77,8 +103,6 @@ contract PermissionReceipt is ERC721URIStorage {
         emit ReceiptRevoked(tokenId, msg.sender, currentOwner, receipt.revokedAt);
     }
 
-    // Soulbound enforcement: allow mint (from == 0) and burn (to == 0),
-    // block transfers (from != 0 && to != 0).
     function _update(
         address to,
         uint256 tokenId,
