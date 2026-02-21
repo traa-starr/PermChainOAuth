@@ -5,10 +5,10 @@ async function main() {
   const permissionReceipt = await PermissionReceipt.deploy();
   await permissionReceipt.waitForDeployment();
 
-  console.log("PermissionReceipt deployed to:", await permissionReceipt.getAddress());
-  console.log(
-    "ABI is available at artifacts/contracts/PermissionReceipt.sol/PermissionReceipt.json"
-  );
+  const address = await permissionReceipt.getAddress();
+
+  console.log(`PermissionReceipt deployed on ${hre.network.name}: ${address}`);
+  console.log("ABI: artifacts/contracts/PermissionReceipt.sol/PermissionReceipt.json");
 }
 
 main().catch((error) => {

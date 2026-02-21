@@ -13,12 +13,6 @@ module.exports = {
       },
     },
   },
-  paths: {
-    sources: "./contracts",
-    tests: "./test",
-    cache: "./cache",
-    artifacts: "./artifacts",
-  },
   networks: {
     hardhat: {
       chainId: 31337,
@@ -26,6 +20,10 @@ module.exports = {
         mnemonic: TEST_MNEMONIC,
         count: 10,
       },
+    },
+    sepolia: {
+      url: process.env.ALCHEMY_SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/YOUR_ALCHEMY_API_KEY",
+      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
     },
   },
 };
