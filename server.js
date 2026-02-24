@@ -46,53 +46,61 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
   const client = createPublicClient({ transport: http(rpcUrl) });
   const address = getAddress(contractAddress);
   const abi = parseAbi([
-    'function receipts(uint256 tokenId) view returns (address granter,address grantee,string scope,string proofHash,uint256 issuedAt,uint256 expiresAt,uint256 revokedAt,bool active)',
+    'function receipts(uint256 tokenId) view returns (address granter,address grantee,bytes32 proofHash,uint64 issuedAt,uint64 expiresAt,uint64 revokedAt,bool active,bool exists)',
+    'function getScopeHashes(uint256 tokenId) view returns (bytes32[])',
     'function isValid(uint256 tokenId,bytes32 scopeHash,uint256 timestamp) view returns (bool)',
     'function hasScopeHash(uint256 tokenId,bytes32 scopeHash) view returns (bool)',
-    'function isRevoked(uint256 tokenId) view returns (bool)',
-    'function isExpired(uint256 tokenId) view returns (bool)',
   ]);
 
   async function readReceipt(receiptId) {
-    const raw = await client.readContract({
-      address,
-      abi,
-      functionName: 'receipts',
-      args: [BigInt(receiptId)],
-    });
+    const [raw, scopeHashes] = await Promise.all([
+      client.readContract({
+        address,
+        abi,
+        functionName: 'receipts',
+        args: [BigInt(receiptId)],
+      }),
+      client.readContract({
+        address,
+        abi,
+        functionName: 'getScopeHashes',
+        args: [BigInt(receiptId)],
+      }),
+    ]);
 
-    const scopeHashes = [hashScope(raw[2])];
     return {
       receiptId: Number(receiptId),
       granter: getAddress(raw[0]),
       grantee: getAddress(raw[1]),
-      scope: String(raw[2]),
+      proofHash: raw[2],
+      issuedAt: Number(raw[3]),
+      expiresAt: Number(raw[4]),
+      revokedAt: Number(raw[5]),
+      active: Boolean(raw[6]),
+      exists: Boolean(raw[7]),
       scopeHashes,
-      proofHash: String(raw[3]),
-      issuedAt: Number(raw[4]),
-      expiresAt: Number(raw[5]),
-      revokedAt: Number(raw[6]),
-      active: Boolean(raw[7]),
     };
   }
 
-  async function isValid({ receiptId, requiredScopeHash, now }) {
-    try {
-      return await client.readContract({
-        address,
-        abi,
-        functionName: 'isValid',
-        args: [BigInt(receiptId), requiredScopeHash, BigInt(now)],
-      });
-    } catch {
-      const receipt = await readReceipt(receiptId);
-      if (!receipt.active || receipt.revokedAt > 0) return false;
-      if (!receipt.scopeHashes.includes(requiredScopeHash)) return false;
-      return receipt.expiresAt === 0 || now <= receipt.expiresAt;
-    }
+  async function hasScopeHash({ receiptId, requiredScopeHash }) {
+    return client.readContract({
+      address,
+      abi,
+      functionName: 'hasScopeHash',
+      args: [BigInt(receiptId), requiredScopeHash],
+    });
   }
 
-  return { readReceipt, isValid };
+  async function isValid({ receiptId, requiredScopeHash, now }) {
+    return client.readContract({
+      address,
+      abi,
+      functionName: 'isValid',
+      args: [BigInt(receiptId), requiredScopeHash, BigInt(now)],
+    });
+  }
+
+  return { readReceipt, hasScopeHash, isValid };
 }
 
 async function verifySiwe({ message, signature, expectedDomain, expectedChainId }) {
@@ -134,7 +142,16 @@ function createBridgeApp({
 
   app.post('/authorize', async (req, res) => {
     try {
-      const { siweMessage, siweSignature, grantee, scopes = [], metadataURI = '', expiresAt } = req.body || {};
+      const {
+        siweMessage,
+        siweSignature,
+        grantee,
+        scopes = [],
+        metadataURI = '',
+        expiresAt,
+        mode = 'client-mint',
+        mintWithSig = null,
+      } = req.body || {};
       if (!siweMessage || !siweSignature || !grantee) {
         return res.status(400).json({ error: 'siweMessage, siweSignature, grantee are required' });
       }
@@ -160,18 +177,42 @@ function createBridgeApp({
       const resolvedExpiresAt = Number(expiresAt || now + Number(receiptTtlSeconds));
       const proofHash = keccak256(toBytes(JSON.stringify(scopeHashes)));
 
-      return res.json({
-        mintIntent: {
-          contractAddress: getAddress(contractAddress),
-          chainId: Number(chainId),
+      const mintIntent = {
+        mode,
+        contractAddress: getAddress(contractAddress),
+        chainId: Number(chainId),
+        granter,
+        grantee: getAddress(grantee),
+        scopeHashes,
+        expiresAt: resolvedExpiresAt,
+        proofHash,
+        metadataURI,
+      };
+
+      if (mode === 'gasless') {
+        if (!mintWithSig) {
+          return res.status(400).json({ error: 'mintWithSig payload is required for gasless mode' });
+        }
+        if (typeof receiptClient.relayMintWithSig !== 'function') {
+          return res.status(501).json({ error: 'Gasless mode unavailable: relayMintWithSig not configured' });
+        }
+        const relayResult = await receiptClient.relayMintWithSig({
           granter,
           grantee: getAddress(grantee),
           scopeHashes,
           expiresAt: resolvedExpiresAt,
-          proofHash,
           metadataURI,
-          mintFunction: 'mint(address grantee, bytes32[] scopeHashes, string metadataURI, bytes32 proofHash, uint256 expiresAt)',
-          note: 'User wallet must submit mint transaction. granter is msg.sender on-chain.',
+          proofHash,
+          mintWithSig,
+        });
+        return res.json({ mintIntent, relayResult });
+      }
+
+      return res.json({
+        mintIntent: {
+          ...mintIntent,
+          mintFunction: 'mint(address granter, address grantee, bytes32[] scopeHashes, string metadataURI, bytes32 proofHash, uint64 expiresAt)',
+          note: 'User wallet must submit mint transaction. granter must equal msg.sender on-chain.',
         },
       });
     } catch (error) {
@@ -181,7 +222,13 @@ function createBridgeApp({
 
   app.post('/token', async (req, res) => {
     try {
-      const { receiptId, siweMessage, siweSignature, requiredScopeHashes = [hashScope(requiredScope)] } = req.body || {};
+      const {
+        receiptId,
+        siweMessage,
+        siweSignature,
+        requiredScopeHashes = [hashScope(requiredScope)],
+        aud = getAddress(contractAddress),
+      } = req.body || {};
       if (!receiptId || !siweMessage || !siweSignature) {
         return res.status(400).json({ error: 'receiptId, siweMessage, siweSignature are required' });
       }
@@ -203,6 +250,11 @@ function createBridgeApp({
       let validForAnyRequestedScope = false;
       for (const requiredScopeHash of requiredScopeHashes) {
         // eslint-disable-next-line no-await-in-loop
+        const hasScope = typeof receiptClient.hasScopeHash === 'function'
+          ? await receiptClient.hasScopeHash({ receiptId, requiredScopeHash })
+          : receipt.scopeHashes.includes(requiredScopeHash);
+        if (!hasScope) continue;
+        // eslint-disable-next-line no-await-in-loop
         const ok = await receiptClient.isValid({ receiptId, requiredScopeHash, now });
         if (ok) {
           validForAnyRequestedScope = true;
@@ -222,6 +274,8 @@ function createBridgeApp({
         scopeHashes: receipt.scopeHashes,
         iat: now,
         exp: jwtExp,
+        aud,
+        iss: `permchain-oauth:${Number(chainId)}`,
         chainId: Number(chainId),
       };
       const accessToken = jwt.sign(payload, jwtSecret, { algorithm: 'HS256' });
@@ -250,11 +304,13 @@ function createBridgeApp({
       return {
         active: true,
         sub: decoded.sub,
-        scope: decoded.scopeHashes.join(' '),
+        scopeHashes: decoded.scopeHashes,
         exp: decoded.exp,
         receiptId: decoded.receiptId,
         granter: decoded.granter,
         grantee: decoded.grantee,
+        aud: decoded.aud,
+        iss: decoded.iss,
       };
     } catch {
       return { active: false };

@@ -16,6 +16,11 @@ function createMockReceiptClient(initialReceipts) {
       if (!r) throw new Error('receipt not found');
       return { ...r };
     },
+    async hasScopeHash({ receiptId, requiredScopeHash }) {
+      const r = receipts.get(Number(receiptId));
+      if (!r) return false;
+      return r.scopeHashes.includes(requiredScopeHash);
+    },
     async isValid({ receiptId, requiredScopeHash, now }) {
       const r = receipts.get(Number(receiptId));
       if (!r) return false;
@@ -71,6 +76,7 @@ test('happy path: authorize intent then token exchange with granter SIWE', async
       granter: granter.address,
       grantee: grantee.address,
       scopeHashes: [hashScope('ai:train_data')],
+      proofHash: hashScope('proof-1'),
       active: true,
       expiresAt: now + 3600,
       revokedAt: 0,
@@ -123,6 +129,14 @@ test('happy path: authorize intent then token exchange with granter SIWE', async
 
     assert.equal(tokenRes.status, 200);
     assert.ok(tokenRes.data.access_token);
+
+    const introspect = await postJson(server.url, '/introspect', {
+      token: tokenRes.data.access_token,
+      requiredScopeHash: hashScope('ai:train_data'),
+    });
+
+    assert.equal(introspect.status, 200);
+    assert.equal(introspect.data.active, true);
   } finally {
     await server.close();
   }
@@ -139,6 +153,7 @@ test('revoke invalidates introspection', async () => {
       granter: granter.address,
       grantee: grantee.address,
       scopeHashes: [hashScope('ai:train_data')],
+      proofHash: hashScope('proof-1'),
       active: true,
       expiresAt: now + 3600,
       revokedAt: 0,
