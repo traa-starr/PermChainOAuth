@@ -3,10 +3,17 @@ pragma solidity ^0.8.20;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+
+contract PermissionReceipt is ERC721URIStorage {
+    string public constant SCOPE_HASH_DOMAIN = "PERMCHAIN_SCOPE_V1:";
+
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract PermissionReceipt is ERC721URIStorage, EIP712 {
+
     error NotGranter();
     error Soulbound();
     error NonexistentReceipt();
@@ -61,7 +68,7 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
     constructor() ERC721("PermissionReceipt", "PRCPT") EIP712("PermissionReceipt", "1") {}
 
     function scopeHash(string calldata scope) public pure returns (bytes32) {
-        return keccak256(bytes(scope));
+        return keccak256(abi.encodePacked(SCOPE_HASH_DOMAIN, scope));
     }
 
     /// @notice Mints a non-transferable permission receipt with hashed scopes.

@@ -8,9 +8,10 @@ const { createPublicClient, http, parseAbi, getAddress, keccak256, toBytes, isAd
 const { readCache, writeCache } = require('./indexer/cacheStore');
 
 const DEFAULT_CHAIN_ID = 11155111;
+const SCOPE_HASH_DOMAIN = 'PERMCHAIN_SCOPE_V1:';
 
 function hashScope(scope) {
-  return keccak256(toBytes(String(scope)));
+  return keccak256(toBytes(`${SCOPE_HASH_DOMAIN}${String(scope)}`));
 }
 
 function createNonceStore() {
