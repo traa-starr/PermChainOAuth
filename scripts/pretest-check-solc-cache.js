@@ -36,6 +36,19 @@ if (!metadata || typeof metadata !== "object" || !metadata.fileName) {
   fail("solc-build.json must contain a 'fileName' field.");
 }
 
+// Reject nightly/pre-release compiler caches. These are semver-lower than the
+// corresponding release (e.g. `0.8.20-nightly...` < `0.8.20`) and will fail on
+// pragmas like `^0.8.20`.
+if (
+  String(metadata.longVersion || "").includes("nightly") ||
+  String(metadata.fileName || "").includes("nightly")
+) {
+  fail(
+    "Offline Solidity cache must use the released compiler build (not nightly/pre-release). " +
+      "Re-run: npm run cache:solc (on an online machine)"
+  );
+}
+
 const listPath = path.join(CACHE_DIR, "list.json");
 if (!fs.existsSync(listPath)) {
   fail(`Missing ${path.relative(process.cwd(), listPath)}.`);

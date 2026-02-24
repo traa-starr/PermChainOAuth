@@ -58,10 +58,43 @@ async function main() {
   fs.writeFileSync(LIST_FILE, listBuffer);
 
   const list = JSON.parse(listBuffer.toString("utf8"));
-  const build = list.builds.find((entry) => entry.version === SOLC_VERSION);
+  // Prefer the *released* compiler for SOLC_VERSION.
+  // Nightly/pre-release builds are semver-lower than the release and will fail
+  // on pragmas like `^0.8.20` (OpenZeppelin v5 uses this).
+  let build;
+
+  const releasePath = list?.releases?.[SOLC_VERSION];
+  if (releasePath) {
+    build = list.builds.find((entry) => entry.path === releasePath);
+  } else {
+    const candidates = (list.builds || []).filter((entry) => entry.version === SOLC_VERSION);
+    build =
+      candidates.find(
+        (entry) =>
+          !String(entry.longVersion || "").includes("nightly") &&
+          !String(entry.path || "").includes("nightly") &&
+          !String(entry.longVersion || "").includes("-")
+      ) ||
+      candidates.find(
+        (entry) =>
+          !String(entry.longVersion || "").includes("nightly") &&
+          !String(entry.path || "").includes("nightly")
+      ) ||
+      candidates[0];
+  }
 
   if (!build) {
     throw new Error(`Version ${SOLC_VERSION} not found in ${listUrl}`);
+  }
+
+  if (String(build.longVersion || "").includes("nightly") || String(build.path || "").includes("nightly")) {
+    throw new Error(
+      `Resolved ${SOLC_VERSION} to a nightly/pre-release build (${build.longVersion || build.path}).
+` +
+        `This repo requires the released ${SOLC_VERSION} compiler (e.g. soljson-v${SOLC_VERSION}+commit.*.js).
+` +
+        `If you're online, re-run: npm run cache:solc`
+    );
   }
 
   const compilerUrl = `${SOLC_BASE_URL}/${build.path}`;
