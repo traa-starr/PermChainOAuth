@@ -8,107 +8,170 @@ contract PermissionReceipt is ERC721URIStorage {
     error NotGranter();
     error Soulbound();
     error InvalidGranterCaller();
-    error InactivePermission();
-    error PermissionExpired();
+    error AlreadyRevoked();
+    error NotRevoked();
+    error ReceiptNotFound();
 
     struct Receipt {
         address granter;
         address grantee;
-        string scope;
-        string proofHash;
-        uint256 issuedAt;
-        uint256 expiresAt;
-        uint256 revokedAt;
+        bytes32 proofHash;
+        uint64 issuedAt;
+        uint64 expiresAt;
+        uint64 revokedAt;
         bool active;
+        bool exists;
     }
 
     uint256 private _nextTokenId = 1;
+
     mapping(uint256 => Receipt) public receipts;
+    mapping(uint256 => bytes32[]) private _scopeHashesByToken;
+    mapping(uint256 => mapping(bytes32 => bool)) private _hasScopeHash;
 
     event ReceiptMinted(
         uint256 indexed tokenId,
         address indexed granter,
         address indexed grantee,
-        string scope,
-        string tokenURI,
-        string proofHash,
-        uint256 expiresAt
+        bytes32[] scopeHashes,
+        uint64 expiresAt,
+        bytes32 proofHash
     );
 
-    event ReceiptRevoked(
-        uint256 indexed tokenId,
-        address indexed granter,
-        address indexed grantee,
-        uint256 revokedAt
-    );
+    event ReceiptRevoked(uint256 indexed tokenId, uint64 indexed revokedAt);
 
     constructor() ERC721("PermissionReceipt", "PRCPT") {}
 
+    function scopeHash(string calldata scope) public pure returns (bytes32) {
+        return keccak256(bytes(scope));
+    }
+
     function mint(
         address granter,
-        address to,
-        string calldata scope,
+        address grantee,
+        bytes32[] calldata scopeHashes,
         string calldata metadataURI,
-        string calldata proofHash,
-        uint256 expiresAt
-    ) public returns (uint256 tokenId) {
+        bytes32 proofHash,
+        uint64 expiresAt
+    ) external returns (uint256 tokenId) {
         if (granter != msg.sender) {
             revert InvalidGranterCaller();
         }
 
         tokenId = _nextTokenId++;
 
-        _safeMint(to, tokenId);
+        _safeMint(grantee, tokenId);
         _setTokenURI(tokenId, metadataURI);
 
         receipts[tokenId] = Receipt({
             granter: granter,
-            grantee: to,
-            scope: scope,
+            grantee: grantee,
             proofHash: proofHash,
-            issuedAt: block.timestamp,
+            issuedAt: uint64(block.timestamp),
             expiresAt: expiresAt,
             revokedAt: 0,
-            active: true
+            active: true,
+            exists: true
         });
 
-        emit ReceiptMinted(tokenId, granter, to, scope, metadataURI, proofHash, expiresAt);
+        uint256 count = scopeHashes.length;
+        for (uint256 i = 0; i < count; i++) {
+            bytes32 hash = scopeHashes[i];
+            if (!_hasScopeHash[tokenId][hash]) {
+                _hasScopeHash[tokenId][hash] = true;
+                _scopeHashesByToken[tokenId].push(hash);
+            }
+        }
+
+        emit ReceiptMinted(tokenId, granter, grantee, _scopeHashesByToken[tokenId], expiresAt, proofHash);
     }
 
-    function getPermission(uint256 tokenId) external view returns (Receipt memory receipt) {
-        receipt = receipts[tokenId];
+    function scopeHashesOf(uint256 tokenId) external view returns (bytes32[] memory) {
+        _requireReceipt(tokenId);
+        return _scopeHashesByToken[tokenId];
+    }
 
-        if (!receipt.active) {
-            revert InactivePermission();
+    function hasScopeHash(uint256 tokenId, bytes32 hash) public view returns (bool) {
+        if (!receipts[tokenId].exists) {
+            return false;
         }
+        return _hasScopeHash[tokenId][hash];
+    }
 
-        if (receipt.expiresAt != 0 && block.timestamp > receipt.expiresAt) {
-            revert PermissionExpired();
-        }
+    function hasScope(uint256 tokenId, string calldata scope) external view returns (bool) {
+        return hasScopeHash(tokenId, scopeHash(scope));
     }
 
     function revoke(uint256 tokenId) external {
-        Receipt storage receipt = receipts[tokenId];
+        _requireReceipt(tokenId);
 
+        Receipt storage receipt = receipts[tokenId];
         if (receipt.granter != msg.sender) {
             revert NotGranter();
         }
-
-        address currentOwner = ownerOf(tokenId);
+        if (!receipt.active) {
+            revert AlreadyRevoked();
+        }
 
         receipt.active = false;
-        receipt.revokedAt = block.timestamp;
+        receipt.revokedAt = uint64(block.timestamp);
 
-        _burn(tokenId);
-
-        emit ReceiptRevoked(tokenId, msg.sender, currentOwner, receipt.revokedAt);
+        emit ReceiptRevoked(tokenId, receipt.revokedAt);
     }
 
-    function _update(
-        address to,
-        uint256 tokenId,
-        address auth
-    ) internal override returns (address) {
+    function burnRevoked(uint256 tokenId) external {
+        _requireReceipt(tokenId);
+
+        Receipt storage receipt = receipts[tokenId];
+        if (receipt.granter != msg.sender) {
+            revert NotGranter();
+        }
+        if (receipt.active || receipt.revokedAt == 0) {
+            revert NotRevoked();
+        }
+
+        _burn(tokenId);
+    }
+
+    function isExpired(uint256 tokenId, uint64 timestamp) public view returns (bool) {
+        _requireReceipt(tokenId);
+
+        uint64 expiry = receipts[tokenId].expiresAt;
+        return expiry != 0 && timestamp > expiry;
+    }
+
+    function isRevoked(uint256 tokenId) public view returns (bool) {
+        _requireReceipt(tokenId);
+
+        return !receipts[tokenId].active;
+    }
+
+    function isValid(uint256 tokenId, bytes32 requiredScopeHash, uint64 timestamp) external view returns (bool) {
+        Receipt storage receipt = receipts[tokenId];
+
+        if (!receipt.exists) {
+            return false;
+        }
+        if (!receipt.active) {
+            return false;
+        }
+        if (receipt.expiresAt != 0 && timestamp > receipt.expiresAt) {
+            return false;
+        }
+        if (requiredScopeHash != bytes32(0) && !_hasScopeHash[tokenId][requiredScopeHash]) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function _requireReceipt(uint256 tokenId) internal view {
+        if (!receipts[tokenId].exists) {
+            revert ReceiptNotFound();
+        }
+    }
+
+    function _update(address to, uint256 tokenId, address auth) internal override returns (address) {
         address from = _ownerOf(tokenId);
 
         if (from != address(0) && to != address(0)) {

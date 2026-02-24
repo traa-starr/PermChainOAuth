@@ -43,6 +43,41 @@ All contract commands below run from the **repository root**.
   npm run deploy:localhost
   ```
 
+
+## Offline Environments: Compiler Cache Required
+Hardhat normally downloads Solidity compilers on demand. In restricted CI/Codex containers, this fails if outbound internet/DNS is blocked.
+
+Use the cache script in an online environment first, then commit the generated cache files to this repo:
+
+```bash
+npm run cache:solc
+```
+
+This writes:
+- `artifacts/cache/solc/list.json`
+- `artifacts/cache/solc/soljson-v0.8.20+commit.a1b79de6.js`
+- `artifacts/cache/solc/solc-build.json`
+
+Then zip/ship the repository **with** `artifacts/cache/solc` so Hardhat can compile offline without downloading the compiler.
+
+## Receipt Validity & Scope Model
+- **Revocation is explicit state**, not burn-based truth. Calling `revoke(tokenId)` marks `active=false` and sets `revokedAt`, while the token remains queryable for audit/history.
+- Receipts are still **soulbound** (non-transferable).
+- Scopes are stored as `bytes32` hashes on-chain. Integrators can hash off-chain, or call the helper `scopeHash(string)`.
+
+### Integrator validation flow
+1. Compute the scope hash (`scopeHash("read:reports")` equivalent to `keccak256(bytes(scope))`).
+2. Call:
+   - `isValid(tokenId, requiredScopeHash, timestamp)` for canonical authorization checks.
+   - `hasScopeHash(tokenId, scopeHash)` when you need direct scope membership checks.
+3. Use `requiredScopeHash = 0x0` in `isValid` to skip scope requirement and validate only existence/revocation/expiry.
+
+`isValid` returns `true` only if all are satisfied:
+- token exists
+- not revoked
+- not expired (`expiresAt == 0` means no expiry)
+- required scope is present (unless requiredScopeHash is zero)
+
 ## Frontend
 This repository currently includes React source files under `src/`, but it does **not** include a complete frontend build/dev-server configuration in the root project scripts yet.
 
