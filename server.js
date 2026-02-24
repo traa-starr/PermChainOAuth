@@ -2,8 +2,10 @@ require('dotenv').config();
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const path = require('path');
 const { SiweMessage, generateNonce } = require('siwe');
 const { createPublicClient, http, parseAbi, getAddress, keccak256, toBytes, isAddress } = require('viem');
+const { readCache, writeCache } = require('./indexer/cacheStore');
 
 const DEFAULT_CHAIN_ID = 11155111;
 
@@ -68,17 +70,36 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
       }),
     ]);
 
+
+
+    const scopeHashes = await client.readContract({
+      address,
+      abi,
+      functionName: 'getScopeHashes',
+      args: [BigInt(receiptId)],
+    });
+
+
     return {
       receiptId: Number(receiptId),
       granter: getAddress(raw[0]),
       grantee: getAddress(raw[1]),
+
       proofHash: raw[2],
+
+      scopeHashes: scopeHashes.map(String),
+      proofHash: String(raw[2]),
+
       issuedAt: Number(raw[3]),
       expiresAt: Number(raw[4]),
       revokedAt: Number(raw[5]),
       active: Boolean(raw[6]),
       exists: Boolean(raw[7]),
+
       scopeHashes,
+
+      updatedAt: Date.now(),
+
     };
   }
 
@@ -101,6 +122,58 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
   }
 
   return { readReceipt, hasScopeHash, isValid };
+}
+
+function createCachedReceiptClient({ receiptClient, cachePath = path.join('indexer', 'receipt-cache.json'), staleMs = 30_000 }) {
+  function getCachedEntry(receiptId) {
+    const cache = readCache(cachePath);
+    return { cache, entry: cache.receipts[String(receiptId)] };
+  }
+
+  async function refreshReceipt(receiptId) {
+    const fresh = await receiptClient.readReceipt(receiptId);
+    const cache = readCache(cachePath);
+    cache.receipts[String(receiptId)] = {
+      tokenId: Number(receiptId),
+      ...fresh,
+      updatedAt: Date.now(),
+    };
+    writeCache(cachePath, cache);
+    return fresh;
+  }
+
+  async function readReceipt(receiptId) {
+    const { entry } = getCachedEntry(receiptId);
+    if (entry && Date.now() - Number(entry.updatedAt || 0) <= staleMs) {
+      return entry;
+    }
+    return refreshReceipt(receiptId);
+  }
+
+  async function isValid({ receiptId, requiredScopeHash, now }) {
+    const { entry } = getCachedEntry(receiptId);
+    if (entry) {
+      const notRevoked = Boolean(entry.active) && Number(entry.revokedAt || 0) === 0;
+      const notExpired = Number(entry.expiresAt || 0) === 0 || now <= Number(entry.expiresAt);
+      const hasRequiredScope = !requiredScopeHash || entry.scopeHashes.includes(requiredScopeHash);
+
+      if (Date.now() - Number(entry.updatedAt || 0) <= staleMs) {
+        return notRevoked && notExpired && hasRequiredScope;
+      }
+    }
+
+    const refreshed = await refreshReceipt(receiptId);
+    const notRevoked = Boolean(refreshed.active) && Number(refreshed.revokedAt || 0) === 0;
+    const notExpired = Number(refreshed.expiresAt || 0) === 0 || now <= Number(refreshed.expiresAt);
+    const hasRequiredScope = !requiredScopeHash || refreshed.scopeHashes.includes(requiredScopeHash);
+    return notRevoked && notExpired && hasRequiredScope;
+  }
+
+  return {
+    readReceipt,
+    isValid,
+    refreshReceipt,
+  };
 }
 
 async function verifySiwe({ message, signature, expectedDomain, expectedChainId }) {
@@ -354,6 +427,9 @@ if (require.main === module) {
     TOKEN_TTL_SECONDS = '900',
     RECEIPT_TTL_SECONDS = '3600',
     REQUIRED_SCOPE = 'ai:train_data',
+    USE_RECEIPT_CACHE = 'false',
+    RECEIPT_CACHE_PATH = path.join('indexer', 'receipt-cache.json'),
+    RECEIPT_CACHE_STALE_MS = '30000',
   } = process.env;
 
   if (!RPC_URL || !CONTRACT_ADDRESS || !JWT_SECRET) {
@@ -373,7 +449,14 @@ if (require.main === module) {
     tokenTtlSeconds: Number(TOKEN_TTL_SECONDS),
     receiptTtlSeconds: Number(RECEIPT_TTL_SECONDS),
     requiredScope: REQUIRED_SCOPE,
-    receiptClient,
+    receiptClient:
+      String(USE_RECEIPT_CACHE).toLowerCase() === 'true'
+        ? createCachedReceiptClient({
+            receiptClient,
+            cachePath: RECEIPT_CACHE_PATH,
+            staleMs: Number(RECEIPT_CACHE_STALE_MS),
+          })
+        : receiptClient,
   });
 
   app.listen(Number(PORT), () => {
@@ -385,5 +468,6 @@ module.exports = {
   createBridgeApp,
   createNonceStore,
   createViemReceiptClient,
+  createCachedReceiptClient,
   hashScope,
 };
