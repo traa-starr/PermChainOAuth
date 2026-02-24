@@ -147,3 +147,13 @@ Because of that, there is no supported `npm run dev` or `npm start` frontend com
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](./LICENSE) for details.
+
+
+## How the bridge maps to OAuth
+- **Authorization grant**: the on-chain `PermissionReceipt` token/receipt.
+- **Authorization server**: this Node bridge validates SIWE + chain state.
+- **Access token**: short-lived JWT returned by `/token`.
+- **Token introspection**: `/introspect` re-checks receipt validity and scope hash.
+- **Resource server**: `/data` example endpoint requiring an active token + scope.
+
+See [docs/bridge.md](./docs/bridge.md) for full nonce → authorize → wallet mint → token → introspect flow.
