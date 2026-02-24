@@ -1,109 +1,298 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 describe("PermissionReceipt", function () {
   async function deployFixture() {
     const [granter, grantee, other] = await ethers.getSigners();
-    const PermissionReceipt = await ethers.getContractFactory("PermissionReceipt");
+    const PermissionReceipt = await ethers.getContractFactory(
+      "PermissionReceipt"
+    );
     const permissionReceipt = await PermissionReceipt.deploy();
     await permissionReceipt.waitForDeployment();
 
     return { permissionReceipt, granter, grantee, other };
   }
 
-  it("mints a receipt, emits an event, and stores receipt data", async function () {
+  function hashScope(scope) {
+    return ethers.keccak256(ethers.toUtf8Bytes(scope));
+  }
+
+  function hashProof(granter, primaryScopeHash, nonce, expiresAt) {
+    return ethers.keccak256(
+      ethers.solidityPacked(
+        ["address", "bytes32", "bytes32", "uint64"],
+        [granter, primaryScopeHash, nonce, expiresAt]
+      )
+    );
+  }
+
+  it("mints with multiple scopes and exposes them via hasScopeHash", async function () {
     const { permissionReceipt, granter, grantee } = await deployFixture();
 
-    const scope = "read:reports";
-    const tokenURI = "ipfs://permission-receipt-1";
-    const proofHash = "bafybeigdyrztp4exampleproof";
-    const expiresAt = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+    const scopes = ["read:reports", "write:reports", "read:calendar"];
+    const scopeHashes = scopes.map(hashScope);
+    const expiresAt = BigInt(
+      (await ethers.provider.getBlock("latest")).timestamp + 3600
+    );
+    const proofHash = hashProof(
+      granter.address,
+      scopeHashes[0],
+      ethers.id("nonce-1"),
+      expiresAt
+    );
 
     await expect(
       permissionReceipt
         .connect(granter)
-        .mint(granter.address, grantee.address, scope, tokenURI, proofHash, expiresAt)
+        .mint(
+          grantee.address,
+          scopeHashes,
+          "ipfs://permission-receipt-1",
+          proofHash,
+          expiresAt
+        )
     )
       .to.emit(permissionReceipt, "ReceiptMinted")
-      .withArgs(1, granter.address, grantee.address, scope, tokenURI, proofHash, expiresAt);
+      .withArgs(
+        1,
+        granter.address,
+        grantee.address,
+        scopeHashes,
+        expiresAt,
+        proofHash
+      );
 
-    expect(await permissionReceipt.ownerOf(1)).to.equal(grantee.address);
+    expect(await permissionReceipt.hasScopeHash(1, scopeHashes[0])).to.equal(
+      true
+    );
+    expect(await permissionReceipt.hasScopeHash(1, scopeHashes[1])).to.equal(
+      true
+    );
+    expect(await permissionReceipt.hasScopeHash(1, scopeHashes[2])).to.equal(
+      true
+    );
+    expect(
+      await permissionReceipt.hasScopeHash(1, hashScope("delete:reports"))
+    ).to.equal(false);
 
-    const receipt = await permissionReceipt.receipts(1);
-    expect(receipt.granter).to.equal(granter.address);
-    expect(receipt.grantee).to.equal(grantee.address);
-    expect(receipt.scope).to.equal(scope);
-    expect(receipt.proofHash).to.equal(proofHash);
-    expect(receipt.expiresAt).to.equal(expiresAt);
-    expect(receipt.active).to.equal(true);
-    expect(receipt.revokedAt).to.equal(0n);
+    const onChainScopeHashes = await permissionReceipt.getScopeHashes(1);
+    expect(onChainScopeHashes).to.deep.equal(scopeHashes);
   });
 
-  it("reverts mint when caller is not the declared granter", async function () {
-    const { permissionReceipt, granter, grantee, other } = await deployFixture();
+  it("reverts mint with zero-address grantee", async function () {
+    const { permissionReceipt, granter } = await deployFixture();
 
     await expect(
       permissionReceipt
-        .connect(other)
-        .mint(granter.address, grantee.address, "scope", "ipfs://x", "proof", 0)
-    ).to.be.revertedWithCustomError(permissionReceipt, "InvalidGranterCaller");
+        .connect(granter)
+        .mint(
+          ethers.ZeroAddress,
+          [hashScope("scope")],
+          "ipfs://x",
+          ethers.id("proof"),
+          0
+        )
+    ).to.be.revertedWithCustomError(permissionReceipt, "ZeroAddressGrantee");
   });
 
-  it("allows only the granter to revoke and burns the token", async function () {
-    const { permissionReceipt, granter, grantee, other } = await deployFixture();
+  it("reverts mint with empty scopes", async function () {
+    const { permissionReceipt, granter, grantee } = await deployFixture();
+
+    await expect(
+      permissionReceipt
+        .connect(granter)
+        .mint(grantee.address, [], "ipfs://x", ethers.id("proof"), 0)
+    ).to.be.revertedWithCustomError(permissionReceipt, "EmptyScopes");
+  });
+
+  it("isValid is immediately false for receipts minted with past expiry", async function () {
+    const { permissionReceipt, granter, grantee } = await deployFixture();
+
+    const now = (await ethers.provider.getBlock("latest")).timestamp;
+    const expiresAt = BigInt(now - 1);
+    const scope = hashScope("session");
+
+    await expect(
+      permissionReceipt
+        .connect(granter)
+        .mint(
+          grantee.address,
+          [scope],
+          "ipfs://permission-receipt-2",
+          ethers.id("proof"),
+          expiresAt
+        )
+    ).to.not.be.reverted;
+
+    expect(await permissionReceipt.isExpired(1, BigInt(now))).to.equal(true);
+    expect(await permissionReceipt.isValid(1, scope, BigInt(now))).to.equal(
+      false
+    );
+  });
+
+  it("revoke marks receipt revoked and makes isValid false without burning", async function () {
+    const { permissionReceipt, granter, grantee } = await deployFixture();
+
+    const scope = hashScope("admin");
 
     await permissionReceipt
       .connect(granter)
-      .mint(granter.address, grantee.address, "write:reports", "ipfs://permission-receipt-2", "proof", 0);
+      .mint(
+        grantee.address,
+        [scope],
+        "ipfs://permission-receipt-3",
+        ethers.id("proof"),
+        0
+      );
 
-    await expect(permissionReceipt.connect(other).revoke(1)).to.be.revertedWithCustomError(
-      permissionReceipt,
-      "NotGranter"
-    );
+    await expect(permissionReceipt.connect(granter).revoke(1))
+      .to.emit(permissionReceipt, "ReceiptRevoked")
+      .withArgs(1, anyValue);
 
-    await expect(permissionReceipt.connect(granter).revoke(1)).to.emit(
-      permissionReceipt,
-      "ReceiptRevoked"
-    );
-
-    await expect(permissionReceipt.ownerOf(1)).to.be.revertedWithCustomError(
-      permissionReceipt,
-      "ERC721NonexistentToken"
-    );
+    expect(await permissionReceipt.ownerOf(1)).to.equal(grantee.address);
+    expect(await permissionReceipt.isRevoked(1)).to.equal(true);
+    expect(
+      await permissionReceipt.isValid(
+        1,
+        scope,
+        BigInt((await ethers.provider.getBlock("latest")).timestamp)
+      )
+    ).to.equal(false);
 
     const receipt = await permissionReceipt.receipts(1);
     expect(receipt.active).to.equal(false);
     expect(receipt.revokedAt).to.not.equal(0n);
   });
 
-  it("reverts in getPermission when receipt is expired", async function () {
-    const { permissionReceipt, granter, grantee } = await deployFixture();
+  it("revoke reverts for nonexistent receipt", async function () {
+    const { permissionReceipt, granter } = await deployFixture();
 
-    const now = (await ethers.provider.getBlock("latest")).timestamp;
-    const expiresAt = now + 60;
+    await expect(
+      permissionReceipt.connect(granter).revoke(123)
+    ).to.be.revertedWithCustomError(permissionReceipt, "NonexistentReceipt");
+  });
+
+  it("keeps revoke idempotent", async function () {
+    const { permissionReceipt, granter, grantee } = await deployFixture();
 
     await permissionReceipt
       .connect(granter)
-      .mint(granter.address, grantee.address, "session", "ipfs://permission-receipt-3", "proof", expiresAt);
+      .mint(
+        grantee.address,
+        [hashScope("read:reports")],
+        "ipfs://permission-receipt-4",
+        ethers.id("proof"),
+        0
+      );
 
-    await ethers.provider.send("evm_increaseTime", [61]);
-    await ethers.provider.send("evm_mine");
+    await permissionReceipt.connect(granter).revoke(1);
+    await expect(permissionReceipt.connect(granter).revoke(1)).to.not.be
+      .reverted;
+  });
 
-    await expect(permissionReceipt.getPermission(1)).to.be.revertedWithCustomError(
-      permissionReceipt,
-      "PermissionExpired"
+  it("enforces soulbound non-transferability", async function () {
+    const { permissionReceipt, granter, grantee, other } =
+      await deployFixture();
+
+    await permissionReceipt
+      .connect(granter)
+      .mint(
+        grantee.address,
+        [hashScope("read:reports")],
+        "ipfs://permission-receipt-5",
+        ethers.id("proof"),
+        0
+      );
+
+    await expect(
+      permissionReceipt
+        .connect(grantee)
+        .transferFrom(grantee.address, other.address, 1)
+    ).to.be.revertedWithCustomError(permissionReceipt, "Soulbound");
+  });
+
+  it("returns false for scope mismatch", async function () {
+    const { permissionReceipt, granter, grantee } = await deployFixture();
+
+    const readScope = hashScope("read:reports");
+    const writeScope = hashScope("write:reports");
+
+    await permissionReceipt
+      .connect(granter)
+      .mint(
+        grantee.address,
+        [readScope],
+        "ipfs://permission-receipt-6",
+        ethers.id("proof"),
+        0
+      );
+
+    const now = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+
+    expect(await permissionReceipt.isValid(1, writeScope, now)).to.equal(false);
+    expect(await permissionReceipt.hasScope(1, "read:reports")).to.equal(true);
+    expect(await permissionReceipt.hasScope(1, "write:reports")).to.equal(
+      false
     );
   });
 
-  it("reverts transfers because token is soulbound", async function () {
-    const { permissionReceipt, granter, grantee, other } = await deployFixture();
+  it("supports timestamp-based validation with custom timestamp param", async function () {
+    const { permissionReceipt, granter, grantee } = await deployFixture();
+
+    const now = (await ethers.provider.getBlock("latest")).timestamp;
+    const expiresAt = BigInt(now + 120);
+    const scope = hashScope("session");
 
     await permissionReceipt
       .connect(granter)
-      .mint(granter.address, grantee.address, "admin", "ipfs://permission-receipt-4", "proof", 0);
+      .mint(
+        grantee.address,
+        [scope],
+        "ipfs://permission-receipt-7",
+        ethers.id("proof"),
+        expiresAt
+      );
+
+    expect(
+      await permissionReceipt.isValid(1, scope, BigInt(now + 100))
+    ).to.equal(true);
+    expect(
+      await permissionReceipt.isValid(1, scope, BigInt(now + 121))
+    ).to.equal(false);
+
+    expect(
+      await permissionReceipt.isValid(1, ethers.ZeroHash, BigInt(now + 100))
+    ).to.equal(true);
+  });
+
+  it("returns consistent helper behavior for nonexistent receipts", async function () {
+    const { permissionReceipt } = await deployFixture();
+
+    expect(await permissionReceipt.exists(999)).to.equal(false);
+    expect(await permissionReceipt.isRevoked(999)).to.equal(false);
+    expect(await permissionReceipt.isExpired(999, 123)).to.equal(false);
+    expect(
+      await permissionReceipt.hasScopeHash(999, hashScope("read:reports"))
+    ).to.equal(false);
+    expect(await permissionReceipt.isValid(999, ethers.ZeroHash, 0)).to.equal(
+      false
+    );
+  });
+
+  it("getPermission reverts for nonexistent receipt", async function () {
+    const { permissionReceipt } = await deployFixture();
 
     await expect(
-      permissionReceipt.connect(grantee).transferFrom(grantee.address, other.address, 1)
-    ).to.be.revertedWithCustomError(permissionReceipt, "Soulbound");
+      permissionReceipt.getPermission(42)
+    ).to.be.revertedWithCustomError(permissionReceipt, "NonexistentReceipt");
+  });
+
+  it("getScopeHashes reverts for nonexistent receipt", async function () {
+    const { permissionReceipt } = await deployFixture();
+
+    await expect(
+      permissionReceipt.getScopeHashes(42)
+    ).to.be.revertedWithCustomError(permissionReceipt, "NonexistentReceipt");
   });
 });
