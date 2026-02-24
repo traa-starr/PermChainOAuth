@@ -4,16 +4,14 @@
   "private": true,
   "scripts": {
     "setup": "node scripts/setup-env.js",
+    "cache:solc": "node scripts/cache_compiler.js",
     "compile": "hardhat compile",
+    "pretest": "node scripts/pretest-check-solc-cache.js",
     "test": "hardhat test",
+    "test:bridge": "node --test bridge-tests/*.test.js",
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.js",
-    "deploy:localhost": "hardhat run scripts/deploy.js --network localhost",
-<<<<<<< codex/implement-oauth-bridge-server-functions
-    "test:bridge": "node --test bridge-tests/*.test.js"
-=======
-    "cache:solc": "node scripts/cache_compiler.js"
->>>>>>> holyfield
+    "deploy:localhost": "hardhat run scripts/deploy.js --network localhost"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.0.2",

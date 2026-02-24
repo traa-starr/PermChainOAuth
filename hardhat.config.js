@@ -10,24 +10,45 @@ const TEST_MNEMONIC =
 const LOCAL_SOLC_CACHE_DIR = path.join(__dirname, "artifacts", "cache", "solc");
 const LOCAL_SOLC_METADATA_PATH = path.join(LOCAL_SOLC_CACHE_DIR, "solc-build.json");
 
+function cacheError(reason) {
+  return new Error(
+    `${reason}\n\nOffline Solidity cache is required for this repository.\n` +
+      "Remediation (run on an ONLINE machine):\n" +
+      "  npm ci && npm run cache:solc\n" +
+      "Then commit artifacts/cache/solc/{list.json,<soljson file>,solc-build.json}."
+  );
+}
+
 subtask(TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD, async (args, hre, runSuper) => {
   if (args.solcVersion !== "0.8.20") {
     return runSuper();
   }
 
   if (!fs.existsSync(LOCAL_SOLC_METADATA_PATH)) {
-    throw new Error(
-      "Offline compiler cache missing. Run `node scripts/cache_compiler.js` (with internet) and commit artifacts/cache/solc."
+    throw cacheError(`Missing ${path.relative(__dirname, LOCAL_SOLC_METADATA_PATH)}.`);
+  }
+
+  let metadata;
+  try {
+    metadata = JSON.parse(fs.readFileSync(LOCAL_SOLC_METADATA_PATH, "utf8"));
+  } catch (error) {
+    throw cacheError(`Invalid JSON in ${path.relative(__dirname, LOCAL_SOLC_METADATA_PATH)}: ${error.message}`);
+  }
+
+  if (!metadata.fileName) {
+    throw cacheError("Invalid solc-build.json: expected 'fileName'.");
+  }
+
+  const compilerPath = path.join(LOCAL_SOLC_CACHE_DIR, metadata.fileName);
+  if (!fs.existsSync(compilerPath)) {
+    throw cacheError(
+      `Missing compiler file ${path.relative(__dirname, compilerPath)} referenced by solc-build.json.`
     );
   }
 
-  const metadata = JSON.parse(fs.readFileSync(LOCAL_SOLC_METADATA_PATH, "utf8"));
-  const compilerPath = path.resolve(metadata.compilerPath);
-
-  if (!fs.existsSync(compilerPath)) {
-    throw new Error(
-      `Cached compiler not found at ${compilerPath}. Rebuild cache with node scripts/cache_compiler.js.`
-    );
+  const listPath = path.join(LOCAL_SOLC_CACHE_DIR, "list.json");
+  if (!fs.existsSync(listPath)) {
+    throw cacheError(`Missing ${path.relative(__dirname, listPath)}.`);
   }
 
   return {
