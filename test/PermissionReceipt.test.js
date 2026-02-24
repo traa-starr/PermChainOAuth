@@ -1,6 +1,6 @@
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 describe("PermissionReceipt", function () {
   async function deployFixture() {
@@ -46,6 +46,7 @@ describe("PermissionReceipt", function () {
       permissionReceipt
         .connect(granter)
         .mint(
+          granter.address,
           grantee.address,
           scopeHashes,
           "ipfs://permission-receipt-1",
@@ -87,6 +88,7 @@ describe("PermissionReceipt", function () {
       permissionReceipt
         .connect(granter)
         .mint(
+          granter.address,
           ethers.ZeroAddress,
           [hashScope("scope")],
           "ipfs://x",
@@ -102,7 +104,14 @@ describe("PermissionReceipt", function () {
     await expect(
       permissionReceipt
         .connect(granter)
-        .mint(grantee.address, [], "ipfs://x", ethers.id("proof"), 0)
+        .mint(
+          granter.address,
+          grantee.address,
+          [],
+          "ipfs://x",
+          ethers.id("proof"),
+          0
+        )
     ).to.be.revertedWithCustomError(permissionReceipt, "EmptyScopes");
   });
 
@@ -117,6 +126,7 @@ describe("PermissionReceipt", function () {
       permissionReceipt
         .connect(granter)
         .mint(
+          granter.address,
           grantee.address,
           [scope],
           "ipfs://permission-receipt-2",
@@ -139,6 +149,7 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
+        granter.address,
         grantee.address,
         [scope],
         "ipfs://permission-receipt-3",
@@ -163,6 +174,9 @@ describe("PermissionReceipt", function () {
     const receipt = await permissionReceipt.receipts(1);
     expect(receipt.active).to.equal(false);
     expect(receipt.revokedAt).to.not.equal(0n);
+
+    const now = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+    expect(await permissionReceipt.isValid(1, scope, now)).to.equal(false);
   });
 
   it("revoke reverts for nonexistent receipt", async function () {
@@ -179,6 +193,7 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
+        granter.address,
         grantee.address,
         [hashScope("read:reports")],
         "ipfs://permission-receipt-4",
@@ -198,6 +213,7 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
+        granter.address,
         grantee.address,
         [hashScope("read:reports")],
         "ipfs://permission-receipt-5",
@@ -221,6 +237,7 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
+        granter.address,
         grantee.address,
         [readScope],
         "ipfs://permission-receipt-6",
@@ -247,6 +264,7 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
+        granter.address,
         grantee.address,
         [scope],
         "ipfs://permission-receipt-7",

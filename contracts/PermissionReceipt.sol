@@ -2,13 +2,11 @@
 pragma solidity ^0.8.20;
 
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
 contract PermissionReceipt is ERC721URIStorage {
     error NotGranter();
     error Soulbound();
-    error InactivePermission();
-    error PermissionExpired();
+    error InvalidGranterCaller();
     error NonexistentReceipt();
     error ZeroAddressGrantee();
     error EmptyScopes();
@@ -21,6 +19,7 @@ contract PermissionReceipt is ERC721URIStorage {
         uint64 expiresAt;
         uint64 revokedAt;
         bool active;
+        bool exists;
     }
 
     uint256 private _nextTokenId = 1;
@@ -38,19 +37,28 @@ contract PermissionReceipt is ERC721URIStorage {
         bytes32 proofHash
     );
 
-    event ReceiptRevoked(uint256 indexed tokenId, uint64 revokedAt);
+    event ReceiptRevoked(uint256 indexed tokenId, uint64 indexed revokedAt);
 
     constructor() ERC721("PermissionReceipt", "PRCPT") {}
+
+    function scopeHash(string calldata scope) public pure returns (bytes32) {
+        return keccak256(bytes(scope));
+    }
 
     /// @notice Mints a non-transferable permission receipt with hashed scopes.
     /// @dev Expired-at-mint receipts are allowed by policy; use `isValid` for authorization truth.
     function mint(
+        address granter,
         address grantee,
         bytes32[] calldata scopeHashes,
         string calldata metadataURI,
         bytes32 proofHash,
         uint64 expiresAt
     ) external returns (uint256 tokenId) {
+        if (granter != msg.sender) {
+            revert InvalidGranterCaller();
+        }
+
         if (grantee == address(0)) {
             revert ZeroAddressGrantee();
         }
@@ -75,16 +83,47 @@ contract PermissionReceipt is ERC721URIStorage {
         }
 
         receipts[tokenId] = Receipt({
-            granter: msg.sender,
+            granter: granter,
             grantee: grantee,
             proofHash: proofHash,
             issuedAt: uint64(block.timestamp),
             expiresAt: expiresAt,
             revokedAt: 0,
-            active: true
+            active: true,
+            exists: true
         });
 
-        emit ReceiptMinted(tokenId, msg.sender, grantee, _scopeHashesByToken[tokenId], expiresAt, proofHash);
+        emit ReceiptMinted(
+            tokenId,
+            granter,
+            grantee,
+            _scopeHashesByToken[tokenId],
+            expiresAt,
+            proofHash
+        );
+    }
+
+    /// @notice Returns the scope hashes stored for a receipt.
+    function getScopeHashes(uint256 tokenId) external view returns (bytes32[] memory) {
+        if (!exists(tokenId)) {
+            revert NonexistentReceipt();
+        }
+
+        return _scopeHashesByToken[tokenId];
+    }
+
+    /// @notice Returns whether a receipt includes a required scope hash.
+    /// @dev Returns false for nonexistent receipts to avoid ambiguous mapping reads.
+    function hasScopeHash(uint256 tokenId, bytes32 requiredScopeHash) public view returns (bool) {
+        if (!exists(tokenId)) {
+            return false;
+        }
+
+        return _scopeHashExists[tokenId][requiredScopeHash];
+    }
+
+    function hasScope(uint256 tokenId, string calldata scope) external view returns (bool) {
+        return hasScopeHash(tokenId, scopeHash(scope));
     }
 
     /// @notice Returns true when the receipt NFT exists.
@@ -94,7 +133,7 @@ contract PermissionReceipt is ERC721URIStorage {
     }
 
     /// @notice Revokes a receipt without burning it, preserving historical queryability.
-    /// @dev Reverts for nonexistent receipts, reverts for non-granters, and no-ops if already revoked.
+    /// @dev Reverts for nonexistent receipts; returns early if already revoked.
     function revoke(uint256 tokenId) external {
         if (!exists(tokenId)) {
             revert NonexistentReceipt();
@@ -122,40 +161,6 @@ contract PermissionReceipt is ERC721URIStorage {
         }
 
         receipt = receipts[tokenId];
-
-        if (!receipt.active) {
-            revert InactivePermission();
-        }
-
-        if (isExpired(tokenId, uint64(block.timestamp))) {
-            revert PermissionExpired();
-        }
-    }
-
-    function scopeHash(string calldata scope) public pure returns (bytes32) {
-        return keccak256(bytes(scope));
-    }
-
-    function getScopeHashes(uint256 tokenId) external view returns (bytes32[] memory) {
-        if (!exists(tokenId)) {
-            revert NonexistentReceipt();
-        }
-
-        return _scopeHashesByToken[tokenId];
-    }
-
-    /// @notice Returns whether a receipt includes a required scope hash.
-    /// @dev Returns false for nonexistent receipts to avoid ambiguous mapping reads.
-    function hasScopeHash(uint256 tokenId, bytes32 requiredScopeHash) public view returns (bool) {
-        if (!exists(tokenId)) {
-            return false;
-        }
-
-        return _scopeHashExists[tokenId][requiredScopeHash];
-    }
-
-    function hasScope(uint256 tokenId, string calldata scope) external view returns (bool) {
-        return hasScopeHash(tokenId, scopeHash(scope));
     }
 
     /// @notice Returns whether a receipt is expired at `timestamp`.
@@ -170,7 +175,7 @@ contract PermissionReceipt is ERC721URIStorage {
     }
 
     /// @notice Returns whether a receipt has been revoked.
-    /// @dev Returns false for nonexistent receipts; revocation truth is `!receipts[tokenId].active` when token exists.
+    /// @dev Returns false for nonexistent receipts.
     function isRevoked(uint256 tokenId) public view returns (bool) {
         if (!exists(tokenId)) {
             return false;
@@ -202,11 +207,7 @@ contract PermissionReceipt is ERC721URIStorage {
         return true;
     }
 
-    function _update(
-        address to,
-        uint256 tokenId,
-        address auth
-    ) internal override returns (address) {
+    function _update(address to, uint256 tokenId, address auth) internal override returns (address) {
         address from = _ownerOf(tokenId);
 
         if (from != address(0) && to != address(0)) {
