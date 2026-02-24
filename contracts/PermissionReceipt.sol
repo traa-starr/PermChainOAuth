@@ -2,15 +2,14 @@
 pragma solidity ^0.8.20;
 
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
 contract PermissionReceipt is ERC721URIStorage {
     error NotGranter();
     error Soulbound();
     error InvalidGranterCaller();
-    error AlreadyRevoked();
-    error NotRevoked();
-    error ReceiptNotFound();
+    error NonexistentReceipt();
+    error ZeroAddressGrantee();
+    error EmptyScopes();
 
     struct Receipt {
         address granter;
@@ -27,7 +26,7 @@ contract PermissionReceipt is ERC721URIStorage {
 
     mapping(uint256 => Receipt) public receipts;
     mapping(uint256 => bytes32[]) private _scopeHashesByToken;
-    mapping(uint256 => mapping(bytes32 => bool)) private _hasScopeHash;
+    mapping(uint256 => mapping(bytes32 => bool)) private _scopeHashExists;
 
     event ReceiptMinted(
         uint256 indexed tokenId,
@@ -46,6 +45,8 @@ contract PermissionReceipt is ERC721URIStorage {
         return keccak256(bytes(scope));
     }
 
+    /// @notice Mints a non-transferable permission receipt with hashed scopes.
+    /// @dev Expired-at-mint receipts are allowed by policy; use `isValid` for authorization truth.
     function mint(
         address granter,
         address grantee,
@@ -58,10 +59,28 @@ contract PermissionReceipt is ERC721URIStorage {
             revert InvalidGranterCaller();
         }
 
+        if (grantee == address(0)) {
+            revert ZeroAddressGrantee();
+        }
+
+        if (scopeHashes.length == 0) {
+            revert EmptyScopes();
+        }
+
         tokenId = _nextTokenId++;
 
         _safeMint(grantee, tokenId);
         _setTokenURI(tokenId, metadataURI);
+
+        uint256 scopeCount = scopeHashes.length;
+        for (uint256 i = 0; i < scopeCount; i++) {
+            bytes32 currentScopeHash = scopeHashes[i];
+
+            if (!_scopeHashExists[tokenId][currentScopeHash]) {
+                _scopeHashExists[tokenId][currentScopeHash] = true;
+                _scopeHashesByToken[tokenId].push(currentScopeHash);
+            }
+        }
 
         receipts[tokenId] = Receipt({
             granter: granter,
@@ -74,43 +93,60 @@ contract PermissionReceipt is ERC721URIStorage {
             exists: true
         });
 
-        uint256 count = scopeHashes.length;
-        for (uint256 i = 0; i < count; i++) {
-            bytes32 hash = scopeHashes[i];
-            if (!_hasScopeHash[tokenId][hash]) {
-                _hasScopeHash[tokenId][hash] = true;
-                _scopeHashesByToken[tokenId].push(hash);
-            }
-        }
-
-        emit ReceiptMinted(tokenId, granter, grantee, _scopeHashesByToken[tokenId], expiresAt, proofHash);
+        emit ReceiptMinted(
+            tokenId,
+            granter,
+            grantee,
+            _scopeHashesByToken[tokenId],
+            expiresAt,
+            proofHash
+        );
     }
 
-    function scopeHashesOf(uint256 tokenId) external view returns (bytes32[] memory) {
-        _requireReceipt(tokenId);
+    /// @notice Returns the scope hashes stored for a receipt.
+    function getScopeHashes(uint256 tokenId) external view returns (bytes32[] memory) {
+        if (!exists(tokenId)) {
+            revert NonexistentReceipt();
+        }
+
         return _scopeHashesByToken[tokenId];
     }
 
-    function hasScopeHash(uint256 tokenId, bytes32 hash) public view returns (bool) {
-        if (!receipts[tokenId].exists) {
+    /// @notice Returns whether a receipt includes a required scope hash.
+    /// @dev Returns false for nonexistent receipts to avoid ambiguous mapping reads.
+    function hasScopeHash(uint256 tokenId, bytes32 requiredScopeHash) public view returns (bool) {
+        if (!exists(tokenId)) {
             return false;
         }
-        return _hasScopeHash[tokenId][hash];
+
+        return _scopeHashExists[tokenId][requiredScopeHash];
     }
 
     function hasScope(uint256 tokenId, string calldata scope) external view returns (bool) {
         return hasScopeHash(tokenId, scopeHash(scope));
     }
 
+    /// @notice Returns true when the receipt NFT exists.
+    /// @dev Existence is defined by ERC721 ownership state (`_ownerOf(tokenId) != address(0)`).
+    function exists(uint256 tokenId) public view returns (bool) {
+        return _ownerOf(tokenId) != address(0);
+    }
+
+    /// @notice Revokes a receipt without burning it, preserving historical queryability.
+    /// @dev Reverts for nonexistent receipts; returns early if already revoked.
     function revoke(uint256 tokenId) external {
-        _requireReceipt(tokenId);
+        if (!exists(tokenId)) {
+            revert NonexistentReceipt();
+        }
 
         Receipt storage receipt = receipts[tokenId];
+
         if (receipt.granter != msg.sender) {
             revert NotGranter();
         }
+
         if (!receipt.active) {
-            revert AlreadyRevoked();
+            return;
         }
 
         receipt.active = false;
@@ -119,56 +155,56 @@ contract PermissionReceipt is ERC721URIStorage {
         emit ReceiptRevoked(tokenId, receipt.revokedAt);
     }
 
-    function burnRevoked(uint256 tokenId) external {
-        _requireReceipt(tokenId);
-
-        Receipt storage receipt = receipts[tokenId];
-        if (receipt.granter != msg.sender) {
-            revert NotGranter();
-        }
-        if (receipt.active || receipt.revokedAt == 0) {
-            revert NotRevoked();
+    function getPermission(uint256 tokenId) external view returns (Receipt memory receipt) {
+        if (!exists(tokenId)) {
+            revert NonexistentReceipt();
         }
 
-        _burn(tokenId);
+        receipt = receipts[tokenId];
     }
 
+    /// @notice Returns whether a receipt is expired at `timestamp`.
+    /// @dev Returns false for nonexistent receipts. Expiry is only enforced when `expiresAt != 0`.
     function isExpired(uint256 tokenId, uint64 timestamp) public view returns (bool) {
-        _requireReceipt(tokenId);
+        if (!exists(tokenId)) {
+            return false;
+        }
 
-        uint64 expiry = receipts[tokenId].expiresAt;
-        return expiry != 0 && timestamp > expiry;
+        Receipt memory receipt = receipts[tokenId];
+        return receipt.expiresAt != 0 && timestamp > receipt.expiresAt;
     }
 
+    /// @notice Returns whether a receipt has been revoked.
+    /// @dev Returns false for nonexistent receipts.
     function isRevoked(uint256 tokenId) public view returns (bool) {
-        _requireReceipt(tokenId);
+        if (!exists(tokenId)) {
+            return false;
+        }
 
         return !receipts[tokenId].active;
     }
 
-    function isValid(uint256 tokenId, bytes32 requiredScopeHash, uint64 timestamp) external view returns (bool) {
-        Receipt storage receipt = receipts[tokenId];
+    /// @notice Canonical authorization truth helper for integrators.
+    /// @dev Returns false unless the token exists, is not revoked, is not expired at `timestamp`,
+    /// and contains `requiredScopeHash` when it is non-zero.
+    function isValid(uint256 tokenId, bytes32 requiredScopeHash, uint64 timestamp) public view returns (bool) {
+        if (!exists(tokenId)) {
+            return false;
+        }
 
-        if (!receipt.exists) {
+        if (isRevoked(tokenId)) {
             return false;
         }
-        if (!receipt.active) {
+
+        if (isExpired(tokenId, timestamp)) {
             return false;
         }
-        if (receipt.expiresAt != 0 && timestamp > receipt.expiresAt) {
-            return false;
-        }
-        if (requiredScopeHash != bytes32(0) && !_hasScopeHash[tokenId][requiredScopeHash]) {
+
+        if (requiredScopeHash != bytes32(0) && !hasScopeHash(tokenId, requiredScopeHash)) {
             return false;
         }
 
         return true;
-    }
-
-    function _requireReceipt(uint256 tokenId) internal view {
-        if (!receipts[tokenId].exists) {
-            revert ReceiptNotFound();
-        }
     }
 
     function _update(address to, uint256 tokenId, address auth) internal override returns (address) {
