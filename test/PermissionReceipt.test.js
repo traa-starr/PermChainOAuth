@@ -1,6 +1,7 @@
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { hashScope: offchainHashScope } = require("../server");
 
 describe("PermissionReceipt", function () {
   async function deployFixture() {
@@ -15,8 +16,20 @@ describe("PermissionReceipt", function () {
   }
 
   function hashScope(scope) {
-    return ethers.keccak256(ethers.toUtf8Bytes(scope));
+    return ethers.keccak256(
+      ethers.toUtf8Bytes(`PERMCHAIN_SCOPE_V1:${scope}`)
+    );
   }
+
+  it("matches on-chain and off-chain scope hashing", async function () {
+    const { permissionReceipt } = await deployFixture();
+
+    const scope = "ai:train_data";
+    const onchainHash = await permissionReceipt.scopeHash(scope);
+    const offchainHash = offchainHashScope(scope);
+
+    expect(onchainHash).to.equal(offchainHash);
+  });
 
   function hashProof(granter, primaryScopeHash, nonce, expiresAt) {
     return ethers.keccak256(
