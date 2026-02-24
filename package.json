@@ -4,14 +4,22 @@
   "private": true,
   "scripts": {
     "setup": "node scripts/setup-env.js",
+    "cache:solc": "node scripts/cache_compiler.js",
     "compile": "hardhat compile",
+    "pretest": "node scripts/pretest-check-solc-cache.js",
     "test": "hardhat test",
+    "test:bridge": "node --test bridge-tests/*.test.js",
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.js",
     "deploy:localhost": "hardhat run scripts/deploy.js --network localhost"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.0.2"
+    "@openzeppelin/contracts": "^5.0.2",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "siwe": "^3.0.0",
+    "viem": "^2.46.2"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
