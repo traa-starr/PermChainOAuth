@@ -1,9 +1,3 @@
- codex/create-hardhat-files-for-permissionreceipt-contract
-node_modules/
-artifacts/
-cache/
-.env
-
 # Node.js dependencies
 node_modules/
 
@@ -29,12 +23,16 @@ coverage/
 .parcel-cache/
 .vite/
 .eslintcache
-
-# TypeScript
 *.tsbuildinfo
 
 # Solidity / Hardhat / Foundry artifacts
-artifacts/
+artifacts/*
+!artifacts/cache/
+artifacts/cache/*
+!artifacts/cache/solc/
+!artifacts/cache/solc/list.json
+!artifacts/cache/solc/solc-build.json
+!artifacts/cache/solc/soljson-*.js
 cache/
 typechain/
 coverage.json
@@ -55,4 +53,3 @@ Thumbs.db
 # Misc
 tmp/
 temp/
- main

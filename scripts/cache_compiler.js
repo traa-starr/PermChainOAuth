@@ -35,6 +35,20 @@ function download(url) {
   });
 }
 
+function removeExtraFiles(cacheRoot, allowedFileNames) {
+  for (const entry of fs.readdirSync(cacheRoot, { withFileTypes: true })) {
+    const entryPath = path.join(cacheRoot, entry.name);
+    if (entry.isDirectory()) {
+      fs.rmSync(entryPath, { recursive: true, force: true });
+      continue;
+    }
+
+    if (!allowedFileNames.has(entry.name)) {
+      fs.rmSync(entryPath, { force: true });
+    }
+  }
+}
+
 async function main() {
   fs.mkdirSync(CACHE_ROOT, { recursive: true });
 
@@ -65,12 +79,13 @@ async function main() {
         version: build.version,
         longVersion: build.longVersion,
         fileName: build.path,
-        compilerPath,
       },
       null,
       2
     )
   );
+
+  removeExtraFiles(CACHE_ROOT, new Set(["list.json", build.path, "solc-build.json"]));
 
   console.log("Compiler cache updated:");
   console.log(`- list: ${LIST_FILE}`);
