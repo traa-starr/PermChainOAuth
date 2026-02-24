@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-contract PermissionReceipt is ERC721URIStorage {
+contract PermissionReceipt is ERC721URIStorage, EIP712 {
     error NotGranter();
     error Soulbound();
-    error InvalidGranterCaller();
     error NonexistentReceipt();
     error ZeroAddressGrantee();
     error EmptyScopes();
+    error InvalidSignature();
+    error SignatureDeadlineExpired();
+
+    bytes32 private constant MINT_WITH_SIG_TYPEHASH =
+        keccak256(
+            "MintWithSig(address granter,address grantee,bytes32 scopeHashesHash,bytes32 metadataURIHash,bytes32 proofHash,uint64 expiresAt,uint256 nonce,uint256 deadline)"
+        );
 
     struct Receipt {
         address granter;
@@ -22,9 +31,19 @@ contract PermissionReceipt is ERC721URIStorage {
         bool exists;
     }
 
+    struct MintWithSigRequest {
+        address grantee;
+        bytes32[] scopeHashes;
+        string metadataURI;
+        bytes32 proofHash;
+        uint64 expiresAt;
+        uint256 deadline;
+    }
+
     uint256 private _nextTokenId = 1;
 
     mapping(uint256 => Receipt) public receipts;
+    mapping(address => uint256) public nonces;
     mapping(uint256 => bytes32[]) private _scopeHashesByToken;
     mapping(uint256 => mapping(bytes32 => bool)) private _scopeHashExists;
 
@@ -39,7 +58,7 @@ contract PermissionReceipt is ERC721URIStorage {
 
     event ReceiptRevoked(uint256 indexed tokenId, uint64 indexed revokedAt);
 
-    constructor() ERC721("PermissionReceipt", "PRCPT") {}
+    constructor() ERC721("PermissionReceipt", "PRCPT") EIP712("PermissionReceipt", "1") {}
 
     function scopeHash(string calldata scope) public pure returns (bytes32) {
         return keccak256(bytes(scope));
@@ -48,17 +67,74 @@ contract PermissionReceipt is ERC721URIStorage {
     /// @notice Mints a non-transferable permission receipt with hashed scopes.
     /// @dev Expired-at-mint receipts are allowed by policy; use `isValid` for authorization truth.
     function mint(
-        address granter,
         address grantee,
         bytes32[] calldata scopeHashes,
         string calldata metadataURI,
         bytes32 proofHash,
         uint64 expiresAt
     ) external returns (uint256 tokenId) {
-        if (granter != msg.sender) {
-            revert InvalidGranterCaller();
+        tokenId = _mintReceipt(msg.sender, grantee, scopeHashes, metadataURI, proofHash, expiresAt);
+    }
+
+    function mintWithSig(
+        address granter,
+        MintWithSigRequest calldata request,
+        bytes calldata signature
+    ) external returns (uint256 tokenId) {
+        if (block.timestamp > request.deadline) {
+            revert SignatureDeadlineExpired();
         }
 
+        uint256 nonce = nonces[granter];
+
+        if (ECDSA.recover(_hashMintWithSig(granter, request, nonce), signature) != granter) {
+            revert InvalidSignature();
+        }
+
+        unchecked {
+            nonces[granter] = nonce + 1;
+        }
+
+        tokenId = _mintReceipt(
+            granter,
+            request.grantee,
+            request.scopeHashes,
+            request.metadataURI,
+            request.proofHash,
+            request.expiresAt
+        );
+    }
+
+    function _hashMintWithSig(
+        address granter,
+        MintWithSigRequest calldata request,
+        uint256 nonce
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                MINT_WITH_SIG_TYPEHASH,
+                granter,
+                request.grantee,
+                keccak256(abi.encodePacked(request.scopeHashes)),
+                keccak256(bytes(request.metadataURI)),
+                request.proofHash,
+                request.expiresAt,
+                nonce,
+                request.deadline
+            )
+        );
+
+        return _hashTypedDataV4(structHash);
+    }
+
+    function _mintReceipt(
+        address granter,
+        address grantee,
+        bytes32[] calldata scopeHashes,
+        string calldata metadataURI,
+        bytes32 proofHash,
+        uint64 expiresAt
+    ) internal returns (uint256 tokenId) {
         if (grantee == address(0)) {
             revert ZeroAddressGrantee();
         }
