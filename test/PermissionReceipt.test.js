@@ -1,6 +1,7 @@
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { hashScope: offchainHashScope } = require("../server");
 
 describe("PermissionReceipt", function () {
   async function deployFixture() {
@@ -15,8 +16,20 @@ describe("PermissionReceipt", function () {
   }
 
   function hashScope(scope) {
-    return ethers.keccak256(ethers.toUtf8Bytes(scope));
+    return ethers.keccak256(
+      ethers.toUtf8Bytes(`PERMCHAIN_SCOPE_V1:${scope}`)
+    );
   }
+
+  it("matches on-chain and off-chain scope hashing", async function () {
+    const { permissionReceipt } = await deployFixture();
+
+    const scope = "ai:train_data";
+    const onchainHash = await permissionReceipt.scopeHash(scope);
+    const offchainHash = offchainHashScope(scope);
+
+    expect(onchainHash).to.equal(offchainHash);
+  });
 
   function hashProof(granter, primaryScopeHash, nonce, expiresAt) {
     return ethers.keccak256(
@@ -46,7 +59,6 @@ describe("PermissionReceipt", function () {
       permissionReceipt
         .connect(granter)
         .mint(
-          granter.address,
           grantee.address,
           scopeHashes,
           "ipfs://permission-receipt-1",
@@ -88,7 +100,6 @@ describe("PermissionReceipt", function () {
       permissionReceipt
         .connect(granter)
         .mint(
-          granter.address,
           ethers.ZeroAddress,
           [hashScope("scope")],
           "ipfs://x",
@@ -105,7 +116,6 @@ describe("PermissionReceipt", function () {
       permissionReceipt
         .connect(granter)
         .mint(
-          granter.address,
           grantee.address,
           [],
           "ipfs://x",
@@ -126,7 +136,6 @@ describe("PermissionReceipt", function () {
       permissionReceipt
         .connect(granter)
         .mint(
-          granter.address,
           grantee.address,
           [scope],
           "ipfs://permission-receipt-2",
@@ -149,7 +158,6 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
-        granter.address,
         grantee.address,
         [scope],
         "ipfs://permission-receipt-3",
@@ -193,7 +201,6 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
-        granter.address,
         grantee.address,
         [hashScope("read:reports")],
         "ipfs://permission-receipt-4",
@@ -213,7 +220,6 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
-        granter.address,
         grantee.address,
         [hashScope("read:reports")],
         "ipfs://permission-receipt-5",
@@ -237,7 +243,6 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
-        granter.address,
         grantee.address,
         [readScope],
         "ipfs://permission-receipt-6",
@@ -264,7 +269,6 @@ describe("PermissionReceipt", function () {
     await permissionReceipt
       .connect(granter)
       .mint(
-        granter.address,
         grantee.address,
         [scope],
         "ipfs://permission-receipt-7",
@@ -313,4 +317,164 @@ describe("PermissionReceipt", function () {
       permissionReceipt.getScopeHashes(42)
     ).to.be.revertedWithCustomError(permissionReceipt, "NonexistentReceipt");
   });
+
 });
+
+
+
+  async function signMintWithSig(
+    permissionReceipt,
+    granter,
+    payload
+  ) {
+    const chainId = (await ethers.provider.getNetwork()).chainId;
+    const nonce = await permissionReceipt.nonces(granter.address);
+
+    const domain = {
+      name: "PermissionReceipt",
+      version: "1",
+      chainId,
+      verifyingContract: await permissionReceipt.getAddress(),
+    };
+
+    const types = {
+      MintWithSig: [
+        { name: "granter", type: "address" },
+        { name: "grantee", type: "address" },
+        { name: "scopeHashesHash", type: "bytes32" },
+        { name: "metadataURIHash", type: "bytes32" },
+        { name: "proofHash", type: "bytes32" },
+        { name: "expiresAt", type: "uint64" },
+        { name: "nonce", type: "uint256" },
+        { name: "deadline", type: "uint256" },
+      ],
+    };
+
+    const message = {
+      granter: granter.address,
+      grantee: payload.grantee,
+      scopeHashesHash: ethers.keccak256(
+        ethers.solidityPacked(
+          Array(payload.scopeHashes.length).fill("bytes32"),
+          payload.scopeHashes
+        )
+      ),
+      metadataURIHash: ethers.keccak256(ethers.toUtf8Bytes(payload.metadataURI)),
+      proofHash: payload.proofHash,
+      expiresAt: payload.expiresAt,
+      nonce,
+      deadline: payload.deadline,
+    };
+
+    return granter.signTypedData(domain, types, message);
+  }
+
+  it("mints with a valid EIP-712 signature", async function () {
+    const { permissionReceipt, granter, grantee, other } = await deployFixture();
+
+    const payload = {
+      grantee: grantee.address,
+      scopeHashes: [hashScope("read:reports"), hashScope("write:reports")],
+      metadataURI: "ipfs://permission-receipt-sig-1",
+      proofHash: ethers.id("sig-proof-1"),
+      expiresAt: 0,
+      deadline: BigInt((await ethers.provider.getBlock("latest")).timestamp + 3600),
+    };
+
+    const signature = await signMintWithSig(permissionReceipt, granter, payload);
+
+    await expect(
+      permissionReceipt.connect(other).mintWithSig(
+        granter.address,
+        payload,
+        signature
+      )
+    )
+      .to.emit(permissionReceipt, "ReceiptMinted")
+      .withArgs(1, granter.address, payload.grantee, payload.scopeHashes, payload.expiresAt, payload.proofHash);
+
+    const receipt = await permissionReceipt.receipts(1);
+    expect(receipt.granter).to.equal(granter.address);
+    expect(await permissionReceipt.nonces(granter.address)).to.equal(1n);
+  });
+
+  it("rejects replayed signatures via nonce protection", async function () {
+    const { permissionReceipt, granter, grantee, other } = await deployFixture();
+
+    const payload = {
+      grantee: grantee.address,
+      scopeHashes: [hashScope("read:reports")],
+      metadataURI: "ipfs://permission-receipt-sig-2",
+      proofHash: ethers.id("sig-proof-2"),
+      expiresAt: 0,
+      deadline: BigInt((await ethers.provider.getBlock("latest")).timestamp + 3600),
+    };
+
+    const signature = await signMintWithSig(permissionReceipt, granter, payload);
+
+    await permissionReceipt.connect(other).mintWithSig(
+      granter.address,
+      payload,
+      signature
+    );
+
+    await expect(
+      permissionReceipt.connect(other).mintWithSig(
+        granter.address,
+        payload,
+        signature
+      )
+    ).to.be.revertedWithCustomError(permissionReceipt, "InvalidSignature");
+  });
+
+  it("rejects mintWithSig when deadline is expired", async function () {
+    const { permissionReceipt, granter, grantee, other } = await deployFixture();
+
+    const payload = {
+      grantee: grantee.address,
+      scopeHashes: [hashScope("read:reports")],
+      metadataURI: "ipfs://permission-receipt-sig-3",
+      proofHash: ethers.id("sig-proof-3"),
+      expiresAt: 0,
+      deadline: BigInt((await ethers.provider.getBlock("latest")).timestamp - 1),
+    };
+
+    const signature = await signMintWithSig(permissionReceipt, granter, payload);
+
+    await expect(
+      permissionReceipt.connect(other).mintWithSig(
+        granter.address,
+        payload,
+        signature
+      )
+    ).to.be.revertedWithCustomError(permissionReceipt, "SignatureDeadlineExpired");
+  });
+
+  it("enforces signed scopes by rejecting tampered scope payloads", async function () {
+    const { permissionReceipt, granter, grantee, other } = await deployFixture();
+
+    const payload = {
+      grantee: grantee.address,
+      scopeHashes: [hashScope("read:reports")],
+      metadataURI: "ipfs://permission-receipt-sig-4",
+      proofHash: ethers.id("sig-proof-4"),
+      expiresAt: 0,
+      deadline: BigInt((await ethers.provider.getBlock("latest")).timestamp + 3600),
+    };
+
+    const signature = await signMintWithSig(permissionReceipt, granter, payload);
+
+    await expect(
+      permissionReceipt.connect(other).mintWithSig(
+        granter.address,
+        {
+          ...payload,
+          scopeHashes: [payload.scopeHashes[0], hashScope("write:reports")],
+        },
+        signature
+      )
+    ).to.be.revertedWithCustomError(permissionReceipt, "InvalidSignature");
+  });
+
+});
+
