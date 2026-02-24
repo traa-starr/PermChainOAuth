@@ -19,7 +19,7 @@ out/
 coverage/
 
 # Cache directories
-.cache/
+/cache/
 .parcel-cache/
 .vite/
 .eslintcache
@@ -33,7 +33,7 @@ artifacts/cache/*
 !artifacts/cache/solc/list.json
 !artifacts/cache/solc/solc-build.json
 !artifacts/cache/solc/soljson-*.js
-cache/
+/cache/
 typechain/
 coverage.json
 broadcast/
