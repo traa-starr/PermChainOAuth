@@ -105,6 +105,31 @@ This repository currently includes React source files under `src/`, but it does 
 
 Because of that, there is no supported `npm run dev` or `npm start` frontend command in this repo at this time.
 
+
+## Receipt Indexer Cache (optional)
+
+A lightweight JSON indexer is available to reduce repetitive RPC calls during token introspection.
+
+- Start the watcher:
+  ```bash
+  npm run indexer
+  ```
+- Default cache path: `indexer/receipt-cache.json`
+- Required env: `RPC_URL`, `CONTRACT_ADDRESS`
+- Optional env:
+  - `INDEXER_CACHE_PATH` (custom cache file)
+  - `INDEXER_START_BLOCK` (backfill starting block)
+
+Enable cache-aware introspection in the bridge process:
+
+- `USE_RECEIPT_CACHE=true`
+- `RECEIPT_CACHE_PATH=indexer/receipt-cache.json`
+- `RECEIPT_CACHE_STALE_MS=30000`
+
+Consistency strategy:
+- **Event-driven:** `indexer/indexer.js` watches `ReceiptMinted` and `ReceiptRevoked` and updates local state.
+- **On-demand refresh:** if `/introspect` reads a missing or stale entry, the bridge refreshes that `receiptId` from chain and rewrites the cache.
+
 ## Usage
 
 1. Deploy the `PermissionReceipt` contract.
