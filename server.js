@@ -51,7 +51,8 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
   const abi = parseAbi([
     'function receipts(uint256 tokenId) view returns (address granter,address grantee,bytes32 proofHash,uint64 issuedAt,uint64 expiresAt,uint64 revokedAt,bool active,bool exists)',
     'function getScopeHashes(uint256 tokenId) view returns (bytes32[])',
-    'function isValid(uint256 tokenId,bytes32 scopeHash,uint256 timestamp) view returns (bool)',
+    'function mint(address grantee,bytes32[] scopeHashes,string metadataURI,bytes32 proofHash,uint64 expiresAt) returns (uint256)',
+    'function isValid(uint256 tokenId,bytes32 requiredScopeHash,uint64 timestamp) view returns (bool)',
     'function hasScopeHash(uint256 tokenId,bytes32 scopeHash) view returns (bool)',
   ]);
 
@@ -70,37 +71,16 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
         args: [BigInt(receiptId)],
       }),
     ]);
-
-
-
-    const scopeHashes = await client.readContract({
-      address,
-      abi,
-      functionName: 'getScopeHashes',
-      args: [BigInt(receiptId)],
-    });
-
-
     return {
-      receiptId: Number(receiptId),
       granter: getAddress(raw[0]),
       grantee: getAddress(raw[1]),
-
-      proofHash: raw[2],
-
-      scopeHashes: scopeHashes.map(String),
       proofHash: String(raw[2]),
-
       issuedAt: Number(raw[3]),
       expiresAt: Number(raw[4]),
       revokedAt: Number(raw[5]),
       active: Boolean(raw[6]),
       exists: Boolean(raw[7]),
-
-      scopeHashes,
-
-      updatedAt: Date.now(),
-
+      scopeHashes: scopeHashes.map(String),
     };
   }
 
@@ -285,8 +265,8 @@ function createBridgeApp({
       return res.json({
         mintIntent: {
           ...mintIntent,
-          mintFunction: 'mint(address granter, address grantee, bytes32[] scopeHashes, string metadataURI, bytes32 proofHash, uint64 expiresAt)',
-          note: 'User wallet must submit mint transaction. granter must equal msg.sender on-chain.',
+          mintFunction: 'mint(address grantee, bytes32[] scopeHashes, string metadataURI, bytes32 proofHash, uint64 expiresAt)',
+          note: 'User wallet must submit mint transaction. granter is inferred as msg.sender on-chain.',
         },
       });
     } catch (error) {
@@ -468,7 +448,9 @@ if (require.main === module) {
 module.exports = {
   createBridgeApp,
   createNonceStore,
+  createReceiptClient: createViemReceiptClient,
   createViemReceiptClient,
   createCachedReceiptClient,
   hashScope,
+  SCOPE_HASH_DOMAIN,
 };
