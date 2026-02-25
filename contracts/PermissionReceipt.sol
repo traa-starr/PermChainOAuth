@@ -1,19 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-
-import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-
-contract PermissionReceipt is ERC721URIStorage {
-    string public constant SCOPE_HASH_DOMAIN = "PERMCHAIN_SCOPE_V1:";
-
-import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract PermissionReceipt is ERC721URIStorage, EIP712 {
+    string public constant SCOPE_HASH_DOMAIN_PREFIX = "PERMCHAIN_SCOPE_V1:";
 
     error NotGranter();
     error Soulbound();
@@ -69,11 +63,9 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
     constructor() ERC721("PermissionReceipt", "PRCPT") EIP712("PermissionReceipt", "1") {}
 
     function scopeHash(string calldata scope) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked(SCOPE_HASH_DOMAIN, scope));
+        return keccak256(abi.encodePacked(SCOPE_HASH_DOMAIN_PREFIX, scope));
     }
 
-    /// @notice Mints a non-transferable permission receipt with hashed scopes.
-    /// @dev Expired-at-mint receipts are allowed by policy; use `isValid` for authorization truth.
     function mint(
         address grantee,
         bytes32[] calldata scopeHashes,
@@ -123,7 +115,7 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
                 MINT_WITH_SIG_TYPEHASH,
                 granter,
                 request.grantee,
-                keccak256(abi.encodePacked(request.scopeHashes)),
+                keccak256(abi.encode(request.scopeHashes)),
                 keccak256(bytes(request.metadataURI)),
                 request.proofHash,
                 request.expiresAt,
@@ -187,7 +179,6 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
         );
     }
 
-    /// @notice Returns the scope hashes stored for a receipt.
     function getScopeHashes(uint256 tokenId) external view returns (bytes32[] memory) {
         if (!exists(tokenId)) {
             revert NonexistentReceipt();
@@ -196,8 +187,6 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
         return _scopeHashesByToken[tokenId];
     }
 
-    /// @notice Returns whether a receipt includes a required scope hash.
-    /// @dev Returns false for nonexistent receipts to avoid ambiguous mapping reads.
     function hasScopeHash(uint256 tokenId, bytes32 requiredScopeHash) public view returns (bool) {
         if (!exists(tokenId)) {
             return false;
@@ -210,14 +199,10 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
         return hasScopeHash(tokenId, scopeHash(scope));
     }
 
-    /// @notice Returns true when the receipt NFT exists.
-    /// @dev Existence is defined by ERC721 ownership state (`_ownerOf(tokenId) != address(0)`).
     function exists(uint256 tokenId) public view returns (bool) {
         return _ownerOf(tokenId) != address(0);
     }
 
-    /// @notice Revokes a receipt without burning it, preserving historical queryability.
-    /// @dev Reverts for nonexistent receipts; returns early if already revoked.
     function revoke(uint256 tokenId) external {
         if (!exists(tokenId)) {
             revert NonexistentReceipt();
@@ -247,8 +232,6 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
         receipt = receipts[tokenId];
     }
 
-    /// @notice Returns whether a receipt is expired at `timestamp`.
-    /// @dev Returns false for nonexistent receipts. Expiry is only enforced when `expiresAt != 0`.
     function isExpired(uint256 tokenId, uint64 timestamp) public view returns (bool) {
         if (!exists(tokenId)) {
             return false;
@@ -258,8 +241,6 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
         return receipt.expiresAt != 0 && timestamp > receipt.expiresAt;
     }
 
-    /// @notice Returns whether a receipt has been revoked.
-    /// @dev Returns false for nonexistent receipts.
     function isRevoked(uint256 tokenId) public view returns (bool) {
         if (!exists(tokenId)) {
             return false;
@@ -268,9 +249,6 @@ contract PermissionReceipt is ERC721URIStorage, EIP712 {
         return !receipts[tokenId].active;
     }
 
-    /// @notice Canonical authorization truth helper for integrators.
-    /// @dev Returns false unless the token exists, is not revoked, is not expired at `timestamp`,
-    /// and contains `requiredScopeHash` when it is non-zero.
     function isValid(uint256 tokenId, bytes32 requiredScopeHash, uint64 timestamp) public view returns (bool) {
         if (!exists(tokenId)) {
             return false;
