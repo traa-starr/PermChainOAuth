@@ -16,13 +16,26 @@ function ensureParent(filePath) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+function normalizeReceipts(receipts = {}) {
+  return Object.fromEntries(
+    Object.entries(receipts).map(([tokenId, receipt]) => [
+      tokenId,
+      {
+        ...receipt,
+        tokenId: receipt?.tokenId ?? Number(tokenId),
+        scopeHashes: Array.isArray(receipt?.scopeHashes) ? receipt.scopeHashes : [],
+      },
+    ])
+  );
+}
+
 function readCache(filePath) {
   try {
     const raw = fs.readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw);
     return {
       meta: { ...DEFAULT_CACHE.meta, ...(parsed.meta || {}) },
-      receipts: parsed.receipts || {},
+      receipts: normalizeReceipts(parsed.receipts || {}),
     };
   } catch {
     return { ...DEFAULT_CACHE, receipts: {} };
@@ -38,6 +51,7 @@ function writeCache(filePath, data) {
       ...(data.meta || {}),
       updatedAt: Date.now(),
     },
+    receipts: normalizeReceipts(data.receipts || {}),
   };
   fs.writeFileSync(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   return next;
