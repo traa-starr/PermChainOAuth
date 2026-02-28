@@ -6,6 +6,11 @@ This bridge uses an OAuth-ish pattern where:
 
 The server never mints and never needs a private key.
 
+Scope hashes use domain-separated v1 hashing everywhere:
+- Solidity: `scopeHash(scope)` from `PermissionReceipt`
+- Node: `hashScope(scope)` from `server.js`
+- Digest rule: `keccak256("PERMCHAIN_SCOPE_V1:" + scope)`
+
 ## Run
 
 ```bash
@@ -78,7 +83,7 @@ curl -s http://localhost:3001/token \
     "receiptId": 1,
     "siweMessage":"<EIP-4361 with token nonce>",
     "siweSignature":"0x...",
-    "requiredScopeHashes":["0x<keccak256(ai:train_data)>"]
+    "requiredScopeHashes":["0x<hashScope(ai:train_data)>"]
   }'
 ```
 
@@ -95,7 +100,7 @@ curl -s http://localhost:3001/introspect \
   -H 'content-type: application/json' \
   -d '{
     "token":"<access_token>",
-    "requiredScopeHash":"0x<keccak256(ai:train_data)>"
+    "requiredScopeHash":"0x<hashScope(ai:train_data)>"
   }'
 ```
 
