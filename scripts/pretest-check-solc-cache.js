@@ -3,7 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const CACHE_DIR = path.join(process.cwd(), "artifacts", "cache", "solc");
+const CACHE_DIR = path.join(process.cwd(), "solc-cache", "solc");
 const METADATA_PATH = path.join(CACHE_DIR, "solc-build.json");
 
 const REMEDIATION = [
@@ -11,9 +11,9 @@ const REMEDIATION = [
   "Remediation (run on an ONLINE machine):",
   "  npm ci && npm run cache:solc",
   "Then commit these files:",
-  "  artifacts/cache/solc/list.json",
-  "  artifacts/cache/solc/<soljson file>",
-  "  artifacts/cache/solc/solc-build.json",
+  "  solc-cache/solc/list.json",
+  "  solc-cache/solc/<soljson file>",
+  "  solc-cache/solc/solc-build.json",
 ].join("\n");
 
 function fail(reason) {

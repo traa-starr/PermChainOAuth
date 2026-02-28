@@ -9,6 +9,7 @@ const { readCache, writeCache } = require('./indexer/cacheStore');
 
 const DEFAULT_CHAIN_ID = 11155111;
 const SCOPE_HASH_DOMAIN = 'PERMCHAIN_SCOPE_V1:';
+const ZERO_SCOPE_HASH = `0x${'0'.repeat(64)}`;
 
 function hashScope(scope) {
   return keccak256(toBytes(`${SCOPE_HASH_DOMAIN}${String(scope)}`));
@@ -51,27 +52,33 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
   const abi = parseAbi([
     'function receipts(uint256 tokenId) view returns (address granter,address grantee,bytes32 proofHash,uint64 issuedAt,uint64 expiresAt,uint64 revokedAt,bool active,bool exists)',
     'function getScopeHashes(uint256 tokenId) view returns (bytes32[])',
-    'function isValid(uint256 tokenId,bytes32 scopeHash,uint256 timestamp) view returns (bool)',
+    'function mint(address grantee,bytes32[] scopeHashes,string metadataURI,bytes32 proofHash,uint64 expiresAt) returns (uint256)',
+    'function isValid(uint256 tokenId,bytes32 requiredScopeHash,uint64 timestamp) view returns (bool)',
     'function hasScopeHash(uint256 tokenId,bytes32 scopeHash) view returns (bool)',
   ]);
 
   async function readReceipt(receiptId) {
-    const [raw, scopeHashes] = await Promise.all([
-      client.readContract({
-        address,
-        abi,
-        functionName: 'receipts',
-        args: [BigInt(receiptId)],
-      }),
-      client.readContract({
-        address,
-        abi,
-        functionName: 'getScopeHashes',
-        args: [BigInt(receiptId)],
-      }),
-    ]);
+    const raw = await client.readContract({
+      address,
+      abi,
+      functionName: 'receipts',
+      args: [BigInt(receiptId)],
+    });
 
-
+    const exists = Boolean(raw[7]);
+    if (!exists) {
+      return {
+        granter: getAddress(raw[0]),
+        grantee: getAddress(raw[1]),
+        proofHash: String(raw[2]),
+        issuedAt: Number(raw[3]),
+        expiresAt: Number(raw[4]),
+        revokedAt: Number(raw[5]),
+        active: Boolean(raw[6]),
+        exists: false,
+        scopeHashes: [],
+      };
+    }
 
     const scopeHashes = await client.readContract({
       address,
@@ -80,27 +87,16 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
       args: [BigInt(receiptId)],
     });
 
-
     return {
-      receiptId: Number(receiptId),
       granter: getAddress(raw[0]),
       grantee: getAddress(raw[1]),
-
-      proofHash: raw[2],
-
-      scopeHashes: scopeHashes.map(String),
       proofHash: String(raw[2]),
-
       issuedAt: Number(raw[3]),
       expiresAt: Number(raw[4]),
       revokedAt: Number(raw[5]),
       active: Boolean(raw[6]),
-      exists: Boolean(raw[7]),
-
-      scopeHashes,
-
-      updatedAt: Date.now(),
-
+      exists,
+      scopeHashes: scopeHashes.map(String),
     };
   }
 
@@ -152,11 +148,13 @@ function createCachedReceiptClient({ receiptClient, cachePath = path.join('index
   }
 
   async function isValid({ receiptId, requiredScopeHash, now }) {
+    const bypassScopeCheck =
+      !requiredScopeHash || String(requiredScopeHash).toLowerCase() === ZERO_SCOPE_HASH;
     const { entry } = getCachedEntry(receiptId);
     if (entry) {
       const notRevoked = Boolean(entry.active) && Number(entry.revokedAt || 0) === 0;
       const notExpired = Number(entry.expiresAt || 0) === 0 || now <= Number(entry.expiresAt);
-      const hasRequiredScope = !requiredScopeHash || entry.scopeHashes.includes(requiredScopeHash);
+      const hasRequiredScope = bypassScopeCheck || entry.scopeHashes.includes(requiredScopeHash);
 
       if (Date.now() - Number(entry.updatedAt || 0) <= staleMs) {
         return notRevoked && notExpired && hasRequiredScope;
@@ -166,7 +164,7 @@ function createCachedReceiptClient({ receiptClient, cachePath = path.join('index
     const refreshed = await refreshReceipt(receiptId);
     const notRevoked = Boolean(refreshed.active) && Number(refreshed.revokedAt || 0) === 0;
     const notExpired = Number(refreshed.expiresAt || 0) === 0 || now <= Number(refreshed.expiresAt);
-    const hasRequiredScope = !requiredScopeHash || refreshed.scopeHashes.includes(requiredScopeHash);
+    const hasRequiredScope = bypassScopeCheck || refreshed.scopeHashes.includes(requiredScopeHash);
     return notRevoked && notExpired && hasRequiredScope;
   }
 
@@ -285,8 +283,8 @@ function createBridgeApp({
       return res.json({
         mintIntent: {
           ...mintIntent,
-          mintFunction: 'mint(address granter, address grantee, bytes32[] scopeHashes, string metadataURI, bytes32 proofHash, uint64 expiresAt)',
-          note: 'User wallet must submit mint transaction. granter must equal msg.sender on-chain.',
+          mintFunction: 'mint(address grantee, bytes32[] scopeHashes, string metadataURI, bytes32 proofHash, uint64 expiresAt)',
+          note: 'User wallet must submit mint transaction. granter is inferred as msg.sender on-chain.',
         },
       });
     } catch (error) {
@@ -316,8 +314,8 @@ function createBridgeApp({
       nonceStore.consume({ nonce: siwe.nonce, address: siweAddress, purpose: 'token' });
 
       const receipt = await receiptClient.readReceipt(receiptId);
-      if (siweAddress !== receipt.granter) {
-        return res.status(403).json({ error: 'SIWE signer must match receipt granter' });
+      if (siweAddress !== receipt.grantee) {
+        return res.status(403).json({ error: 'SIWE signer must match receipt grantee' });
       }
 
       const now = Math.floor(Date.now() / 1000);
@@ -341,10 +339,9 @@ function createBridgeApp({
 
       const jwtExp = Math.min(now + Number(tokenTtlSeconds), receipt.expiresAt || now + Number(tokenTtlSeconds));
       const payload = {
-        sub: receipt.grantee,
+        sub: receipt.granter,
+        azp: receipt.grantee,
         receiptId: Number(receiptId),
-        granter: receipt.granter,
-        grantee: receipt.grantee,
         scopeHashes: receipt.scopeHashes,
         iat: now,
         exp: jwtExp,
@@ -378,11 +375,10 @@ function createBridgeApp({
       return {
         active: true,
         sub: decoded.sub,
+        azp: decoded.azp,
         scopeHashes: decoded.scopeHashes,
         exp: decoded.exp,
         receiptId: decoded.receiptId,
-        granter: decoded.granter,
-        grantee: decoded.grantee,
         aud: decoded.aud,
         iss: decoded.iss,
       };
@@ -468,7 +464,9 @@ if (require.main === module) {
 module.exports = {
   createBridgeApp,
   createNonceStore,
+  createReceiptClient: createViemReceiptClient,
   createViemReceiptClient,
   createCachedReceiptClient,
   hashScope,
+  SCOPE_HASH_DOMAIN,
 };

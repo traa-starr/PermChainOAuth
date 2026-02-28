@@ -1,15 +1,34 @@
 require('dotenv').config();
 
 const path = require('path');
-const { createPublicClient, getAddress, http, parseAbi } = require('viem');
+const { createPublicClient, getAddress, http, parseAbi, parseAbiItem } = require('viem');
 const { readCache, writeCache } = require('./cacheStore');
 
+const RECEIPT_MINTED_EVENT = parseAbiItem(
+  'event ReceiptMinted(uint256 indexed tokenId,address indexed granter,address indexed grantee,bytes32[] scopeHashes,uint64 expiresAt,bytes32 proofHash)'
+);
+const RECEIPT_REVOKED_EVENT = parseAbiItem(
+  'event ReceiptRevoked(uint256 indexed tokenId,uint64 indexed revokedAt)'
+);
+
 const abi = parseAbi([
-  'event ReceiptMinted(uint256 indexed tokenId,address indexed granter,address indexed grantee,bytes32[] scopeHashes,uint64 expiresAt,bytes32 proofHash)',
-  'event ReceiptRevoked(uint256 indexed tokenId,uint64 indexed revokedAt)',
   'function receipts(uint256 tokenId) view returns (address granter,address grantee,bytes32 proofHash,uint64 issuedAt,uint64 expiresAt,uint64 revokedAt,bool active,bool exists)',
   'function getScopeHashes(uint256 tokenId) view returns (bytes32[])',
 ]);
+
+function toBlockNumber(value, fallback = 0) {
+  if (value == null) return fallback;
+  if (typeof value === 'bigint') return Number(value);
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function createReport(cache) {
+  return {
+    cachedReceiptsCount: Object.keys(cache.receipts || {}).length,
+    lastProcessedBlock: Number(cache.meta?.lastIndexedBlock || 0),
+  };
+}
 
 async function main() {
   const {
@@ -18,7 +37,13 @@ async function main() {
     CHAIN_ID,
     INDEXER_CACHE_PATH = path.join('indexer', 'receipt-cache.json'),
     INDEXER_START_BLOCK = '0',
+    INDEXER_POLL_INTERVAL_MS = '4000',
   } = process.env;
+
+  const mode = (process.argv[2] || 'sync').toLowerCase();
+  if (!['sync', 'watch'].includes(mode)) {
+    throw new Error('Usage: node indexer/indexer.js [sync|watch]');
+  }
 
   if (!RPC_URL || !CONTRACT_ADDRESS) {
     throw new Error('Missing env: RPC_URL and CONTRACT_ADDRESS are required');
@@ -76,72 +101,70 @@ async function main() {
     };
   }
 
-  async function backfill() {
-    const fromBlock = BigInt(
-      Math.max(Number(cache.meta.lastIndexedBlock || 0), Number(INDEXER_START_BLOCK || 0))
-    );
-    const toBlock = await client.getBlockNumber();
+  async function getEventBatch(fromBlock, toBlock) {
+    const [mintedLogs, revokedLogs] = await Promise.all([
+      client.getLogs({ address, event: RECEIPT_MINTED_EVENT, fromBlock, toBlock }),
+      client.getLogs({ address, event: RECEIPT_REVOKED_EVENT, fromBlock, toBlock }),
+    ]);
 
-    const mintedLogs = await client.getLogs({
-      address,
-      event: abi.find((e) => e.type === 'event' && e.name === 'ReceiptMinted'),
-      fromBlock,
-      toBlock,
+    return [...mintedLogs, ...revokedLogs].sort((a, b) => {
+      const blockDelta = Number((a.blockNumber || 0n) - (b.blockNumber || 0n));
+      if (blockDelta !== 0) return blockDelta;
+      return Number((a.logIndex || 0) - (b.logIndex || 0));
     });
-    for (const log of mintedLogs) {
-      await upsertReceipt(Number(log.args.tokenId));
+  }
+
+  async function processRange(fromBlock, toBlock) {
+    if (toBlock < fromBlock) return;
+    const logs = await getEventBatch(fromBlock, toBlock);
+
+    for (const log of logs) {
+      if (log.eventName === 'ReceiptMinted') {
+        await upsertReceipt(log.args.tokenId);
+      }
+      if (log.eventName === 'ReceiptRevoked') {
+        await markRevoked(log.args.tokenId, log.args.revokedAt);
+      }
+      cache.meta.lastIndexedBlock = Math.max(
+        Number(cache.meta.lastIndexedBlock || 0),
+        toBlockNumber(log.blockNumber, 0)
+      );
     }
 
-    const revokedLogs = await client.getLogs({
-      address,
-      event: abi.find((e) => e.type === 'event' && e.name === 'ReceiptRevoked'),
-      fromBlock,
-      toBlock,
-    });
-    for (const log of revokedLogs) {
-      await markRevoked(Number(log.args.tokenId), Number(log.args.revokedAt));
-    }
-
-    cache.meta.lastIndexedBlock = Number(toBlock);
+    cache.meta.lastIndexedBlock = Math.max(Number(cache.meta.lastIndexedBlock || 0), toBlockNumber(toBlock, 0));
     cache = writeCache(INDEXER_CACHE_PATH, cache);
   }
 
-  await backfill();
-  console.log(`Indexer cache hydrated at ${INDEXER_CACHE_PATH}`);
+  async function syncOnce() {
+    const startFrom = Math.max(Number(cache.meta.lastIndexedBlock || 0), Number(INDEXER_START_BLOCK || 0));
+    const fromBlock = BigInt(startFrom);
+    const toBlock = await client.getBlockNumber();
+    await processRange(fromBlock, toBlock);
+    console.log(JSON.stringify(createReport(cache), null, 2));
+  }
 
-  client.watchContractEvent({
-    address,
-    abi,
-    eventName: 'ReceiptMinted',
-    onLogs: async (logs) => {
-      for (const log of logs) {
-        await upsertReceipt(Number(log.args.tokenId));
-        cache.meta.lastIndexedBlock = Math.max(cache.meta.lastIndexedBlock || 0, Number(log.blockNumber || 0n));
+  async function watchLoop() {
+    await syncOnce();
+
+    const pollIntervalMs = Math.max(1000, Number(INDEXER_POLL_INTERVAL_MS || 4000));
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const latestBlock = await client.getBlockNumber();
+      const from = BigInt(Number(cache.meta.lastIndexedBlock || 0) + 1);
+      if (latestBlock >= from) {
+        await processRange(from, latestBlock);
+        console.log(JSON.stringify(createReport(cache), null, 2));
       }
-      cache = writeCache(INDEXER_CACHE_PATH, cache);
-    },
-    onError: (error) => {
-      console.error('Minted watcher error', error);
-    },
-  });
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+  }
 
-  client.watchContractEvent({
-    address,
-    abi,
-    eventName: 'ReceiptRevoked',
-    onLogs: async (logs) => {
-      for (const log of logs) {
-        await markRevoked(Number(log.args.tokenId), Number(log.args.revokedAt));
-        cache.meta.lastIndexedBlock = Math.max(cache.meta.lastIndexedBlock || 0, Number(log.blockNumber || 0n));
-      }
-      cache = writeCache(INDEXER_CACHE_PATH, cache);
-    },
-    onError: (error) => {
-      console.error('Revoked watcher error', error);
-    },
-  });
+  if (mode === 'sync') {
+    await syncOnce();
+    return;
+  }
 
-  process.stdin.resume();
+  await watchLoop();
 }
 
 main().catch((error) => {

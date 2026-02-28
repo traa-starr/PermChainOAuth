@@ -34,9 +34,9 @@ npm ci && npm run cache:solc
 ```
 
 Commit the generated cache files:
-- `artifacts/cache/solc/list.json`
-- `artifacts/cache/solc/<soljson file>`
-- `artifacts/cache/solc/solc-build.json`
+- `solc-cache/solc/list.json`
+- `solc-cache/solc/<soljson file>`
+- `solc-cache/solc/solc-build.json`
 
 **Offline machine**
 ```bash
@@ -87,7 +87,10 @@ This writes:
 - Scopes are stored as `bytes32` hashes on-chain. Integrators can hash off-chain, or call the helper `scopeHash(string)`.
 
 ### Integrator validation flow
-1. Compute the scope hash (`scopeHash("read:reports")` equivalent to `keccak256(bytes(scope))`).
+1. Compute the scope hash with the domain-separated v1 rule:
+   - Solidity helper: `scopeHash("read:reports")`
+   - Node helper: `hashScope("read:reports")`
+   - Equivalent digest rule: `keccak256("PERMCHAIN_SCOPE_V1:" + scope)`
 2. Call:
    - `isValid(tokenId, requiredScopeHash, timestamp)` for canonical authorization checks.
    - `hasScopeHash(tokenId, scopeHash)` when you need direct scope membership checks.
