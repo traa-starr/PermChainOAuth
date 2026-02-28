@@ -28,6 +28,7 @@ describe("PermissionReceipt", function () {
   async function signMintRequest(permissionReceipt, granter, payload) {
     const nonce = await permissionReceipt.nonces(granter.address);
     const chainId = (await ethers.provider.getNetwork()).chainId;
+    const abiCoder = ethers.AbiCoder.defaultAbiCoder();
 
     const domain = {
       name: "PermissionReceipt",
@@ -37,7 +38,7 @@ describe("PermissionReceipt", function () {
     };
 
     const types = {
-      MintRequest: [
+      MintWithSig: [
         { name: "granter", type: "address" },
         { name: "grantee", type: "address" },
         { name: "scopeHashesHash", type: "bytes32" },
@@ -52,10 +53,7 @@ describe("PermissionReceipt", function () {
     const value = {
       granter: granter.address,
       grantee: payload.grantee,
-      scopeHashesHash: ethers.solidityPackedKeccak256(
-        Array(payload.scopeHashes.length).fill("bytes32"),
-        payload.scopeHashes
-      ),
+      scopeHashesHash: ethers.keccak256(abiCoder.encode(["bytes32[]"], [payload.scopeHashes])),
       metadataURIHash: ethers.keccak256(ethers.toUtf8Bytes(payload.metadataURI)),
       proofHash: payload.proofHash,
       expiresAt: payload.expiresAt,
