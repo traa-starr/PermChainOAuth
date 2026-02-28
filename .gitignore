@@ -29,10 +29,10 @@ coverage/
 artifacts/*
 !artifacts/cache/
 artifacts/cache/*
-!artifacts/cache/solc/
-!artifacts/cache/solc/list.json
-!artifacts/cache/solc/solc-build.json
-!artifacts/cache/solc/soljson-*.js
+!solc-cache/solc/
+!solc-cache/solc/list.json
+!solc-cache/solc/solc-build.json
+!solc-cache/solc/soljson-*.js
 /cache/
 typechain/
 coverage.json

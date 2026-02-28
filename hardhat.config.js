@@ -15,7 +15,7 @@ function cacheError(reason) {
     `${reason}\n\nOffline Solidity cache is required for this repository.\n` +
       "Remediation (run on an ONLINE machine):\n" +
       "  npm ci && npm run cache:solc\n" +
-      "Then commit artifacts/cache/solc/{list.json,<soljson file>,solc-build.json}."
+      "Then commit solc-cache/solc/{list.json,<soljson file>,solc-build.json}."
   );
 }
 
