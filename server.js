@@ -296,8 +296,8 @@ function createBridgeApp({
       nonceStore.consume({ nonce: siwe.nonce, address: siweAddress, purpose: 'token' });
 
       const receipt = await receiptClient.readReceipt(receiptId);
-      if (siweAddress !== receipt.granter) {
-        return res.status(403).json({ error: 'SIWE signer must match receipt granter' });
+      if (siweAddress !== receipt.grantee) {
+        return res.status(403).json({ error: 'SIWE signer must match receipt grantee' });
       }
 
       const now = Math.floor(Date.now() / 1000);
@@ -321,10 +321,9 @@ function createBridgeApp({
 
       const jwtExp = Math.min(now + Number(tokenTtlSeconds), receipt.expiresAt || now + Number(tokenTtlSeconds));
       const payload = {
-        sub: receipt.grantee,
+        sub: receipt.granter,
+        azp: receipt.grantee,
         receiptId: Number(receiptId),
-        granter: receipt.granter,
-        grantee: receipt.grantee,
         scopeHashes: receipt.scopeHashes,
         iat: now,
         exp: jwtExp,
@@ -358,11 +357,10 @@ function createBridgeApp({
       return {
         active: true,
         sub: decoded.sub,
+        azp: decoded.azp,
         scopeHashes: decoded.scopeHashes,
         exp: decoded.exp,
         receiptId: decoded.receiptId,
-        granter: decoded.granter,
-        grantee: decoded.grantee,
         aud: decoded.aud,
         iss: decoded.iss,
       };
