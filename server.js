@@ -9,6 +9,7 @@ const { readCache, writeCache } = require('./indexer/cacheStore');
 
 const DEFAULT_CHAIN_ID = 11155111;
 const SCOPE_HASH_DOMAIN = 'PERMCHAIN_SCOPE_V1:';
+const ZERO_SCOPE_HASH = `0x${'0'.repeat(64)}`;
 
 function hashScope(scope) {
   return keccak256(toBytes(`${SCOPE_HASH_DOMAIN}${String(scope)}`));
@@ -57,20 +58,35 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
   ]);
 
   async function readReceipt(receiptId) {
-    const [raw, scopeHashes] = await Promise.all([
-      client.readContract({
-        address,
-        abi,
-        functionName: 'receipts',
-        args: [BigInt(receiptId)],
-      }),
-      client.readContract({
-        address,
-        abi,
-        functionName: 'getScopeHashes',
-        args: [BigInt(receiptId)],
-      }),
-    ]);
+    const raw = await client.readContract({
+      address,
+      abi,
+      functionName: 'receipts',
+      args: [BigInt(receiptId)],
+    });
+
+    const exists = Boolean(raw[7]);
+    if (!exists) {
+      return {
+        granter: getAddress(raw[0]),
+        grantee: getAddress(raw[1]),
+        proofHash: String(raw[2]),
+        issuedAt: Number(raw[3]),
+        expiresAt: Number(raw[4]),
+        revokedAt: Number(raw[5]),
+        active: Boolean(raw[6]),
+        exists: false,
+        scopeHashes: [],
+      };
+    }
+
+    const scopeHashes = await client.readContract({
+      address,
+      abi,
+      functionName: 'getScopeHashes',
+      args: [BigInt(receiptId)],
+    });
+
     return {
       granter: getAddress(raw[0]),
       grantee: getAddress(raw[1]),
@@ -79,7 +95,7 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
       expiresAt: Number(raw[4]),
       revokedAt: Number(raw[5]),
       active: Boolean(raw[6]),
-      exists: Boolean(raw[7]),
+      exists,
       scopeHashes: scopeHashes.map(String),
     };
   }
@@ -132,11 +148,13 @@ function createCachedReceiptClient({ receiptClient, cachePath = path.join('index
   }
 
   async function isValid({ receiptId, requiredScopeHash, now }) {
+    const bypassScopeCheck =
+      !requiredScopeHash || String(requiredScopeHash).toLowerCase() === ZERO_SCOPE_HASH;
     const { entry } = getCachedEntry(receiptId);
     if (entry) {
       const notRevoked = Boolean(entry.active) && Number(entry.revokedAt || 0) === 0;
       const notExpired = Number(entry.expiresAt || 0) === 0 || now <= Number(entry.expiresAt);
-      const hasRequiredScope = !requiredScopeHash || entry.scopeHashes.includes(requiredScopeHash);
+      const hasRequiredScope = bypassScopeCheck || entry.scopeHashes.includes(requiredScopeHash);
 
       if (Date.now() - Number(entry.updatedAt || 0) <= staleMs) {
         return notRevoked && notExpired && hasRequiredScope;
@@ -146,7 +164,7 @@ function createCachedReceiptClient({ receiptClient, cachePath = path.join('index
     const refreshed = await refreshReceipt(receiptId);
     const notRevoked = Boolean(refreshed.active) && Number(refreshed.revokedAt || 0) === 0;
     const notExpired = Number(refreshed.expiresAt || 0) === 0 || now <= Number(refreshed.expiresAt);
-    const hasRequiredScope = !requiredScopeHash || refreshed.scopeHashes.includes(requiredScopeHash);
+    const hasRequiredScope = bypassScopeCheck || refreshed.scopeHashes.includes(requiredScopeHash);
     return notRevoked && notExpired && hasRequiredScope;
   }
 
