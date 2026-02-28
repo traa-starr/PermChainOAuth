@@ -51,10 +51,10 @@ async function postJson(url, path, body) {
   return { status: response.status, data };
 }
 
-async function buildSignedSiwe({ account, domain, chainId, nonce, statement }) {
+async function buildSignedSiwe({ account, domain, chainId, nonce, statement, address = account.address }) {
   const message = new SiweMessage({
     domain,
-    address: account.address,
+    address,
     statement,
     uri: `http://${domain}`,
     version: '1',
@@ -66,10 +66,11 @@ async function buildSignedSiwe({ account, domain, chainId, nonce, statement }) {
   return { siweMessage: prepared, siweSignature: signature };
 }
 
-test('happy path: authorize intent then token exchange with grantee SIWE', async () => {
+test('token exchange accepts checksum receipt grantee and emits normalized JWT claims', async () => {
   const granter = privateKeyToAccount('0x59c6995e998f97a5a0044966f094538f5d80e7d86f6e08f9c3f1f6ec0b3c3a9a');
   const grantee = privateKeyToAccount('0x8b3a350cf5c34c9194ca3a545d95fcae02c8d36f3d1fc0f24d6e59b8cb4f6f58');
   const now = Math.floor(Date.now() / 1000);
+  assert.notEqual(grantee.address, grantee.address.toLowerCase());
 
   const receiptClient = createMockReceiptClient([
     {
@@ -132,8 +133,8 @@ test('happy path: authorize intent then token exchange with grantee SIWE', async
     assert.ok(tokenRes.data.access_token);
 
     const decoded = jwt.verify(tokenRes.data.access_token, 'test-secret');
-    assert.equal(decoded.sub, granter.address);
-    assert.equal(decoded.azp, grantee.address);
+    assert.equal(decoded.sub, granter.address.toLowerCase());
+    assert.equal(decoded.azp, grantee.address.toLowerCase());
 
     const introspect = await postJson(server.url, '/introspect', {
       token: tokenRes.data.access_token,
@@ -142,8 +143,8 @@ test('happy path: authorize intent then token exchange with grantee SIWE', async
 
     assert.equal(introspect.status, 200);
     assert.equal(introspect.data.active, true);
-    assert.equal(introspect.data.sub, granter.address);
-    assert.equal(introspect.data.azp, grantee.address);
+    assert.equal(introspect.data.sub, granter.address.toLowerCase());
+    assert.equal(introspect.data.azp, grantee.address.toLowerCase());
   } finally {
     await server.close();
   }
