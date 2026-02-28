@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createServer } = require('node:http');
+const jwt = require('jsonwebtoken');
 const { privateKeyToAccount } = require('viem/accounts');
 const { SiweMessage } = require('siwe');
 
@@ -65,7 +66,7 @@ async function buildSignedSiwe({ account, domain, chainId, nonce, statement }) {
   return { siweMessage: prepared, siweSignature: signature };
 }
 
-test('happy path: authorize intent then token exchange with granter SIWE', async () => {
+test('happy path: authorize intent then token exchange with grantee SIWE', async () => {
   const granter = privateKeyToAccount('0x59c6995e998f97a5a0044966f094538f5d80e7d86f6e08f9c3f1f6ec0b3c3a9a');
   const grantee = privateKeyToAccount('0x8b3a350cf5c34c9194ca3a545d95fcae02c8d36f3d1fc0f24d6e59b8cb4f6f58');
   const now = Math.floor(Date.now() / 1000);
@@ -112,9 +113,9 @@ test('happy path: authorize intent then token exchange with granter SIWE', async
     assert.equal(authorizeRes.status, 200);
     assert.equal(authorizeRes.data.mintIntent.granter, granter.address);
 
-    const tokenNonce = await postJson(server.url, '/nonce', { address: granter.address, purpose: 'token' });
+    const tokenNonce = await postJson(server.url, '/nonce', { address: grantee.address, purpose: 'token' });
     const siweToken = await buildSignedSiwe({
-      account: granter,
+      account: grantee,
       domain: 'localhost',
       chainId: 11155111,
       nonce: tokenNonce.data.nonce,
@@ -130,6 +131,10 @@ test('happy path: authorize intent then token exchange with granter SIWE', async
     assert.equal(tokenRes.status, 200);
     assert.ok(tokenRes.data.access_token);
 
+    const decoded = jwt.verify(tokenRes.data.access_token, 'test-secret');
+    assert.equal(decoded.sub, granter.address);
+    assert.equal(decoded.azp, grantee.address);
+
     const introspect = await postJson(server.url, '/introspect', {
       token: tokenRes.data.access_token,
       requiredScopeHash: hashScope('ai:train_data'),
@@ -137,6 +142,8 @@ test('happy path: authorize intent then token exchange with granter SIWE', async
 
     assert.equal(introspect.status, 200);
     assert.equal(introspect.data.active, true);
+    assert.equal(introspect.data.sub, granter.address);
+    assert.equal(introspect.data.azp, grantee.address);
   } finally {
     await server.close();
   }
@@ -171,9 +178,9 @@ test('revoke invalidates introspection', async () => {
 
   const server = await startTestServer(app);
   try {
-    const tokenNonce = await postJson(server.url, '/nonce', { address: granter.address, purpose: 'token' });
+    const tokenNonce = await postJson(server.url, '/nonce', { address: grantee.address, purpose: 'token' });
     const siweToken = await buildSignedSiwe({
-      account: granter,
+      account: grantee,
       domain: 'localhost',
       chainId: 11155111,
       nonce: tokenNonce.data.nonce,
