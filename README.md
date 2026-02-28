@@ -34,9 +34,9 @@ npm ci && npm run cache:solc
 ```
 
 Commit the generated cache files:
-- `artifacts/cache/solc/list.json`
-- `artifacts/cache/solc/<soljson file>`
-- `artifacts/cache/solc/solc-build.json`
+- `solc-cache/solc/list.json`
+- `solc-cache/solc/<soljson file>`
+- `solc-cache/solc/solc-build.json`
 
 **Offline machine**
 ```bash
