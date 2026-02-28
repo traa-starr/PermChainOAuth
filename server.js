@@ -11,6 +11,11 @@ const DEFAULT_CHAIN_ID = 11155111;
 const SCOPE_HASH_DOMAIN = 'PERMCHAIN_SCOPE_V1:';
 const ZERO_SCOPE_HASH = `0x${'0'.repeat(64)}`;
 
+function normalizeAddress(addr) {
+  if (typeof addr !== 'string') return addr;
+  return addr.toLowerCase();
+}
+
 function hashScope(scope) {
   return keccak256(toBytes(`${SCOPE_HASH_DOMAIN}${String(scope)}`));
 }
@@ -68,8 +73,8 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
     const exists = Boolean(raw[7]);
     if (!exists) {
       return {
-        granter: getAddress(raw[0]),
-        grantee: getAddress(raw[1]),
+        granter: normalizeAddress(raw[0]),
+        grantee: normalizeAddress(raw[1]),
         proofHash: String(raw[2]),
         issuedAt: Number(raw[3]),
         expiresAt: Number(raw[4]),
@@ -88,8 +93,8 @@ function createViemReceiptClient({ rpcUrl, contractAddress }) {
     });
 
     return {
-      granter: getAddress(raw[0]),
-      grantee: getAddress(raw[1]),
+      granter: normalizeAddress(raw[0]),
+      grantee: normalizeAddress(raw[1]),
       proofHash: String(raw[2]),
       issuedAt: Number(raw[3]),
       expiresAt: Number(raw[4]),
@@ -314,7 +319,7 @@ function createBridgeApp({
       nonceStore.consume({ nonce: siwe.nonce, address: siweAddress, purpose: 'token' });
 
       const receipt = await receiptClient.readReceipt(receiptId);
-      if (siweAddress !== receipt.grantee) {
+      if (normalizeAddress(siweAddress) !== normalizeAddress(receipt.grantee)) {
         return res.status(403).json({ error: 'SIWE signer must match receipt grantee' });
       }
 
@@ -339,8 +344,8 @@ function createBridgeApp({
 
       const jwtExp = Math.min(now + Number(tokenTtlSeconds), receipt.expiresAt || now + Number(tokenTtlSeconds));
       const payload = {
-        sub: receipt.granter,
-        azp: receipt.grantee,
+        sub: normalizeAddress(receipt.granter),
+        azp: normalizeAddress(receipt.grantee),
         receiptId: Number(receiptId),
         scopeHashes: receipt.scopeHashes,
         iat: now,
@@ -467,6 +472,7 @@ module.exports = {
   createReceiptClient: createViemReceiptClient,
   createViemReceiptClient,
   createCachedReceiptClient,
+  normalizeAddress,
   hashScope,
   SCOPE_HASH_DOMAIN,
 };
