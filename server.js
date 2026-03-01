@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const { createPublicKey } = require('node:crypto');
 const { SiweMessage, generateNonce } = require('siwe');
 const { createPublicClient, http, parseAbi, getAddress, keccak256, toBytes, isAddress } = require('viem');
 const { readCache, writeCache } = require('./indexer/cacheStore');
@@ -194,6 +195,10 @@ function createBridgeApp({
   chainId = DEFAULT_CHAIN_ID,
   contractAddress,
   jwtSecret,
+  jwtAlg = 'RS256',
+  jwtPrivateKeyPem,
+  jwtKid,
+  jwtPublicKeysJson = [],
   siweDomain = 'localhost',
   tokenTtlSeconds = 900,
   receiptTtlSeconds = 3600,
@@ -201,9 +206,55 @@ function createBridgeApp({
   receiptClient,
   nonceStore = createNonceStore(),
 }) {
-  if (!jwtSecret) throw new Error('jwtSecret is required');
+  const normalizedJwtAlg = String(jwtAlg || 'RS256').toUpperCase();
+  if (normalizedJwtAlg === 'RS256') {
+    if (!Array.isArray(jwtPublicKeysJson)) throw new Error('jwtPublicKeysJson must be an array');
+    if (!jwtPrivateKeyPem) throw new Error('jwtPrivateKeyPem is required when jwtAlg=RS256');
+    if (!jwtKid) throw new Error('jwtKid is required when jwtAlg=RS256');
+  } else if (!jwtSecret) {
+    throw new Error('jwtSecret is required when jwtAlg is not RS256');
+  }
   if (!contractAddress) throw new Error('contractAddress is required');
   if (!receiptClient) throw new Error('receiptClient is required');
+
+  const verificationKeys = new Map();
+  const jwksKeys = [];
+
+  function pushJwkFromPublicPem({ kid, publicKeyPem }) {
+    const jwk = createPublicKey(publicKeyPem).export({ format: 'jwk' });
+    jwksKeys.push({
+      ...jwk,
+      kid,
+      use: 'sig',
+      alg: normalizedJwtAlg,
+    });
+  }
+
+  if (normalizedJwtAlg === 'RS256') {
+    const activePublicKeyPem = createPublicKey(jwtPrivateKeyPem).export({ type: 'spki', format: 'pem' });
+    verificationKeys.set(String(jwtKid), activePublicKeyPem);
+    pushJwkFromPublicPem({ kid: String(jwtKid), publicKeyPem: activePublicKeyPem });
+
+    for (const keyEntry of jwtPublicKeysJson || []) {
+      if (!keyEntry || !keyEntry.kid || !keyEntry.publicKeyPem) continue;
+      const keyId = String(keyEntry.kid);
+      if (verificationKeys.has(keyId)) continue;
+      verificationKeys.set(keyId, keyEntry.publicKeyPem);
+      pushJwkFromPublicPem({ kid: keyId, publicKeyPem: keyEntry.publicKeyPem });
+    }
+  }
+
+  function verifyTokenSignature(token) {
+    if (normalizedJwtAlg === 'RS256') {
+      const decoded = jwt.decode(token, { complete: true });
+      const tokenKid = decoded && decoded.header && decoded.header.kid;
+      if (!tokenKid) throw new Error('Missing kid in JWT header');
+      const publicKeyPem = verificationKeys.get(String(tokenKid));
+      if (!publicKeyPem) throw new Error('Unknown kid');
+      return jwt.verify(token, publicKeyPem, { algorithms: [normalizedJwtAlg] });
+    }
+    return jwt.verify(token, jwtSecret, { algorithms: [normalizedJwtAlg] });
+  }
 
   const app = express();
   app.use(express.json());
@@ -354,7 +405,11 @@ function createBridgeApp({
         iss: `permchain-oauth:${Number(chainId)}`,
         chainId: Number(chainId),
       };
-      const accessToken = jwt.sign(payload, jwtSecret, { algorithm: 'HS256' });
+      const signOptions = normalizedJwtAlg === 'RS256'
+        ? { algorithm: normalizedJwtAlg, header: { kid: String(jwtKid), alg: normalizedJwtAlg, typ: 'JWT' } }
+        : { algorithm: normalizedJwtAlg };
+      const signingKey = normalizedJwtAlg === 'RS256' ? jwtPrivateKeyPem : jwtSecret;
+      const accessToken = jwt.sign(payload, signingKey, signOptions);
 
       return res.json({ token_type: 'Bearer', expires_in: Math.max(0, jwtExp - now), access_token: accessToken });
     } catch (error) {
@@ -364,7 +419,7 @@ function createBridgeApp({
 
   async function introspectToken(token, requiredScopeHash = hashScope(requiredScope)) {
     try {
-      const decoded = jwt.verify(token, jwtSecret);
+      const decoded = verifyTokenSignature(token);
       if (!decoded.scopeHashes || !decoded.scopeHashes.includes(requiredScopeHash)) {
         return { active: false };
       }
@@ -399,6 +454,13 @@ function createBridgeApp({
     return res.json(result);
   });
 
+  app.get('/.well-known/jwks.json', (_req, res) => {
+    if (normalizedJwtAlg !== 'RS256') {
+      return res.json({ keys: [] });
+    }
+    return res.json({ keys: jwksKeys });
+  });
+
   app.get('/data', async (req, res) => {
     const authz = req.headers.authorization || '';
     const token = authz.startsWith('Bearer ') ? authz.slice(7) : null;
@@ -425,6 +487,10 @@ if (require.main === module) {
     CHAIN_ID = String(DEFAULT_CHAIN_ID),
     CONTRACT_ADDRESS,
     JWT_SECRET,
+    JWT_ALG = 'RS256',
+    JWT_PRIVATE_KEY_PEM,
+    JWT_KID,
+    JWT_PUBLIC_KEYS_JSON = '[]',
     SIWE_DOMAIN = 'localhost',
     TOKEN_TTL_SECONDS = '900',
     RECEIPT_TTL_SECONDS = '3600',
@@ -434,8 +500,15 @@ if (require.main === module) {
     RECEIPT_CACHE_STALE_MS = '30000',
   } = process.env;
 
-  if (!RPC_URL || !CONTRACT_ADDRESS || !JWT_SECRET) {
-    throw new Error('Missing env: RPC_URL, CONTRACT_ADDRESS, JWT_SECRET');
+  if (!RPC_URL || !CONTRACT_ADDRESS) {
+    throw new Error('Missing env: RPC_URL, CONTRACT_ADDRESS');
+  }
+
+  let parsedPublicKeys;
+  try {
+    parsedPublicKeys = JSON.parse(JWT_PUBLIC_KEYS_JSON);
+  } catch (error) {
+    throw new Error(`Invalid JWT_PUBLIC_KEYS_JSON: ${error.message}`);
   }
 
   const receiptClient = createViemReceiptClient({
@@ -447,6 +520,10 @@ if (require.main === module) {
     chainId: Number(CHAIN_ID),
     contractAddress: CONTRACT_ADDRESS,
     jwtSecret: JWT_SECRET,
+    jwtAlg: JWT_ALG,
+    jwtPrivateKeyPem: JWT_PRIVATE_KEY_PEM,
+    jwtKid: JWT_KID,
+    jwtPublicKeysJson: parsedPublicKeys,
     siweDomain: SIWE_DOMAIN,
     tokenTtlSeconds: Number(TOKEN_TTL_SECONDS),
     receiptTtlSeconds: Number(RECEIPT_TTL_SECONDS),
