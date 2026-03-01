@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const { createPublicKey } = require('node:crypto');
+const { createPublicKey, createHash } = require('node:crypto');
 const { SiweMessage, generateNonce } = require('siwe');
 const { createPublicClient, http, parseAbi, getAddress, keccak256, toBytes, isAddress } = require('viem');
 const { readCache, writeCache } = require('./indexer/cacheStore');
@@ -50,6 +50,101 @@ function createNonceStore() {
       return true;
     },
   };
+}
+
+function toBase64Url(input) {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function computeJktFromJwk(jwk) {
+  if (!jwk || typeof jwk !== 'object' || !jwk.kty) {
+    throw new Error('Invalid DPoP JWK');
+  }
+
+  let members;
+  if (jwk.kty === 'RSA') {
+    members = { e: jwk.e, kty: jwk.kty, n: jwk.n };
+  } else if (jwk.kty === 'EC') {
+    members = { crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y };
+  } else if (jwk.kty === 'OKP') {
+    members = { crv: jwk.crv, kty: jwk.kty, x: jwk.x };
+  } else {
+    throw new Error(`Unsupported DPoP JWK kty: ${jwk.kty}`);
+  }
+
+  if (Object.values(members).some((value) => typeof value !== 'string' || value.length === 0)) {
+    throw new Error('Invalid DPoP JWK members');
+  }
+
+  const canonical = JSON.stringify(members);
+  const digest = createHash('sha256').update(canonical).digest();
+  return toBase64Url(digest);
+}
+
+function createDpopReplayStore({ ttlSeconds }) {
+  const entries = new Map();
+  const ttlMs = Math.max(1, Number(ttlSeconds || 120)) * 1000;
+
+  function prune(nowMs) {
+    for (const [key, expiresAt] of entries) {
+      if (expiresAt <= nowMs) entries.delete(key);
+    }
+  }
+
+  return {
+    assertNotSeen({ jti, jkt }) {
+      const nowMs = Date.now();
+      prune(nowMs);
+      const key = `${String(jkt)}:${String(jti)}`;
+      if (entries.has(key)) {
+        throw new Error('DPoP replay detected');
+      }
+      entries.set(key, nowMs + ttlMs);
+    },
+  };
+}
+
+function canonicalizeHtu(req) {
+  return `${req.protocol}://${req.get('host')}${req.path}`;
+}
+
+function verifyDpop(dpopJwt, expected) {
+  const decoded = jwt.decode(dpopJwt, { complete: true });
+  if (!decoded || !decoded.header || !decoded.payload) {
+    throw new Error('Invalid DPoP JWT');
+  }
+  const jwk = decoded.header.jwk;
+  if (!jwk) throw new Error('Missing DPoP JWK header');
+  const computedJkt = computeJktFromJwk(jwk);
+  if (computedJkt !== expected.cnfJkt) {
+    throw new Error('DPoP JWK thumbprint mismatch');
+  }
+
+  const publicKey = createPublicKey({ key: jwk, format: 'jwk' });
+  const verified = jwt.verify(dpopJwt, publicKey, {
+    algorithms: ['RS256', 'ES256', 'ES384', 'ES512', 'EdDSA'],
+  });
+
+  const { htm, htu, iat, jti } = verified;
+  if (!htm || !htu || !iat || !jti) throw new Error('Missing DPoP claims');
+  if (String(htm).toUpperCase() !== String(expected.htm).toUpperCase()) {
+    throw new Error('DPoP htm mismatch');
+  }
+  if (String(htu) !== String(expected.htu)) {
+    throw new Error('DPoP htu mismatch');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const maxSkewSeconds = Number(expected.maxSkewSeconds || 60);
+  if (Math.abs(now - Number(iat)) > maxSkewSeconds) {
+    throw new Error('DPoP iat outside allowed skew');
+  }
+
+  return { jti: String(jti), jkt: computedJkt, payload: verified };
 }
 
 function createViemReceiptClient({ rpcUrl, contractAddress }) {
@@ -205,6 +300,8 @@ function createBridgeApp({
   requiredScope = 'ai:train_data',
   receiptClient,
   nonceStore = createNonceStore(),
+  popRequired = false,
+  popNonceTtlSeconds = 120,
 }) {
   const normalizedJwtAlg = String(jwtAlg || 'RS256').toUpperCase();
   if (normalizedJwtAlg === 'RS256') {
@@ -219,6 +316,7 @@ function createBridgeApp({
 
   const verificationKeys = new Map();
   const jwksKeys = [];
+  const dpopReplayStore = createDpopReplayStore({ ttlSeconds: popNonceTtlSeconds });
 
   function pushJwkFromPublicPem({ kid, publicKeyPem }) {
     const jwk = createPublicKey(publicKeyPem).export({ format: 'jwk' });
@@ -356,6 +454,7 @@ function createBridgeApp({
         siweSignature,
         requiredScopeHashes = [hashScope(requiredScope)],
         aud = getAddress(contractAddress),
+        dpopJwk,
       } = req.body || {};
       if (!receiptId || !siweMessage || !siweSignature) {
         return res.status(400).json({ error: 'receiptId, siweMessage, siweSignature are required' });
@@ -393,6 +492,15 @@ function createBridgeApp({
         return res.status(403).json({ error: 'Receipt invalid for required scope hash(es)' });
       }
 
+      if (Boolean(popRequired) && !dpopJwk) {
+        return res.status(400).json({ error: 'dpopJwk is required when POP_REQUIRED=true' });
+      }
+
+      let cnf;
+      if (dpopJwk) {
+        cnf = { jkt: computeJktFromJwk(dpopJwk) };
+      }
+
       const jwtExp = Math.min(now + Number(tokenTtlSeconds), receipt.expiresAt || now + Number(tokenTtlSeconds));
       const payload = {
         sub: normalizeAddress(receipt.granter),
@@ -404,6 +512,7 @@ function createBridgeApp({
         aud,
         iss: `permchain-oauth:${Number(chainId)}`,
         chainId: Number(chainId),
+        ...(cnf ? { cnf } : {}),
       };
       const signOptions = normalizedJwtAlg === 'RS256'
         ? { algorithm: normalizedJwtAlg, header: { kid: String(jwtKid), alg: normalizedJwtAlg, typ: 'JWT' } }
@@ -441,6 +550,7 @@ function createBridgeApp({
         receiptId: decoded.receiptId,
         aud: decoded.aud,
         iss: decoded.iss,
+        cnf: decoded.cnf,
       };
     } catch {
       return { active: false };
@@ -467,7 +577,26 @@ function createBridgeApp({
     if (!token) return res.status(401).json({ error: 'Missing bearer token' });
 
     const result = await introspectToken(token, hashScope(requiredScope));
-    if (!result.active) return res.status(403).json({ error: 'Token inactive for required scope' });
+    if (!result.active) {
+      return res.status(Boolean(popRequired) ? 401 : 403).json({ error: 'Token inactive for required scope' });
+    }
+
+    if (Boolean(popRequired)) {
+      const dpopHeader = req.get('dpop');
+      if (!dpopHeader) return res.status(401).json({ error: 'Missing DPoP proof' });
+      if (!result.cnf || !result.cnf.jkt) return res.status(401).json({ error: 'Token missing cnf.jkt' });
+
+      try {
+        const proof = verifyDpop(dpopHeader, {
+          htm: req.method,
+          htu: canonicalizeHtu(req),
+          cnfJkt: result.cnf.jkt,
+        });
+        dpopReplayStore.assertNotSeen({ jti: proof.jti, jkt: proof.jkt });
+      } catch (error) {
+        return res.status(401).json({ error: error.message });
+      }
+    }
 
     return res.json({
       data: 'Protected AI dataset endpoint',
@@ -494,6 +623,8 @@ if (require.main === module) {
     SIWE_DOMAIN = 'localhost',
     TOKEN_TTL_SECONDS = '900',
     RECEIPT_TTL_SECONDS = '3600',
+    POP_REQUIRED = 'false',
+    POP_NONCE_TTL_SECONDS = '120',
     REQUIRED_SCOPE = 'ai:train_data',
     USE_RECEIPT_CACHE = 'false',
     RECEIPT_CACHE_PATH = path.join('indexer', 'receipt-cache.json'),
@@ -527,6 +658,8 @@ if (require.main === module) {
     siweDomain: SIWE_DOMAIN,
     tokenTtlSeconds: Number(TOKEN_TTL_SECONDS),
     receiptTtlSeconds: Number(RECEIPT_TTL_SECONDS),
+    popRequired: String(POP_REQUIRED).toLowerCase() === 'true',
+    popNonceTtlSeconds: Number(POP_NONCE_TTL_SECONDS),
     requiredScope: REQUIRED_SCOPE,
     receiptClient:
       String(USE_RECEIPT_CACHE).toLowerCase() === 'true'
@@ -550,6 +683,8 @@ module.exports = {
   createViemReceiptClient,
   createCachedReceiptClient,
   normalizeAddress,
+  computeJktFromJwk,
+  verifyDpop,
   hashScope,
   SCOPE_HASH_DOMAIN,
 };

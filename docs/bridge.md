@@ -39,6 +39,8 @@ node server.js
 - `TOKEN_TTL_SECONDS` (default `900`)
 - `RECEIPT_TTL_SECONDS` (default `3600`)
 - `REQUIRED_SCOPE` (default `ai:train_data`)
+- `POP_REQUIRED` (default `false`; when `true`, protected resources require DPoP)
+- `POP_NONCE_TTL_SECONDS` (default `120`; in-memory replay window for DPoP `jti` values)
 - `PORT` (default `3001`)
 
 ## JWKS endpoint
@@ -130,12 +132,37 @@ curl -s http://localhost:3001/token \
   }'
 ```
 
+When `POP_REQUIRED=true`, include a DPoP public key JWK on `/token` (stored as `cnf.jkt` in the access token):
+
+```bash
+curl -s http://localhost:3001/token \
+  -H 'content-type: application/json' \
+  -d '{
+    "receiptId": 1,
+    "siweMessage":"<EIP-4361 with token nonce>",
+    "siweSignature":"0x...",
+    "requiredScopeHashes":["0x<hashScope(ai:train_data)>"] ,
+    "dpopJwk": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "...",
+      "y": "..."
+    }
+  }'
+```
+
+Generate an ES256 DPoP key pair (Node.js):
+
+```bash
+node -e "const { generateKeyPairSync, createPublicKey } = require('node:crypto'); const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' }); console.log(JSON.stringify({ privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }), publicJwk: createPublicKey(publicKey).export({ format: 'jwk' }) }, null, 2));"
+```
+
 Server validates:
 - SIWE signature + nonce
 - SIWE signer equals on-chain receipt grantee
 - receipt valid for required scope hash (not revoked/expired)
 
-JWT includes `sub`, `azp`, `receiptId`, `scopeHashes`, and `exp`.
+JWT includes `sub`, `azp`, `receiptId`, `scopeHashes`, `exp`, and (when PoP key is supplied) `cnf.jkt`.
 
 ### 6) Introspect
 ```bash
@@ -148,7 +175,21 @@ curl -s http://localhost:3001/introspect \
 ```
 
 ### 7) Protected API example
+
+Bearer-only mode (default, `POP_REQUIRED=false`):
+
 ```bash
 curl -s http://localhost:3001/data \
   -H "authorization: Bearer <access_token>"
 ```
+
+DPoP mode (`POP_REQUIRED=true`):
+
+```bash
+# DPoP JWT must be signed by the private key matching dpopJwk used at /token
+curl -s http://localhost:3001/data \
+  -H "authorization: Bearer <access_token>" \
+  -H "dpop: <dpop_jwt_with_htm_htu_iat_jti>"
+```
+
+Replay protection: `/data` rejects re-use of the same DPoP `jti` (per key thumbprint) within `POP_NONCE_TTL_SECONDS` with HTTP `401`.
