@@ -4,7 +4,7 @@ This bridge uses an OAuth-ish pattern where:
 - **On-chain receipt** = durable grant record.
 - **JWT access token** = fast API credential.
 
-The server never mints and never needs a private key.
+The server never mints and never needs an on-chain wallet private key.
 
 Scope hashes use domain-separated v1 hashing everywhere:
 - Solidity: `scopeHash(scope)` from `PermissionReceipt`
@@ -18,7 +18,9 @@ npm install
 RPC_URL=https://sepolia.infura.io/v3/<key> \
 CHAIN_ID=11155111 \
 CONTRACT_ADDRESS=0xYourPermissionReceipt \
-JWT_SECRET=super-secret \
+JWT_ALG=RS256 \
+JWT_KID=bridge-key-2026-01 \
+JWT_PRIVATE_KEY_PEM="$(cat ./jwt-private.pem)" \
 SIWE_DOMAIN=localhost \
 node server.js
 ```
@@ -28,12 +30,53 @@ node server.js
 - `RPC_URL` (required)
 - `CHAIN_ID` (default `11155111`)
 - `CONTRACT_ADDRESS` (required)
-- `JWT_SECRET` (required)
+- `JWT_ALG` (default `RS256`)
+- `JWT_PRIVATE_KEY_PEM` (required when `JWT_ALG=RS256`; PEM string used to sign access tokens)
+- `JWT_KID` (required when `JWT_ALG=RS256`; active signing key id)
+- `JWT_PUBLIC_KEYS_JSON` (optional JSON array of `{ "kid": "...", "publicKeyPem": "..." }` for verification during rotation)
+- `JWT_SECRET` (required only when using non-RS256 HMAC modes)
 - `SIWE_DOMAIN` (default `localhost`)
 - `TOKEN_TTL_SECONDS` (default `900`)
 - `RECEIPT_TTL_SECONDS` (default `3600`)
 - `REQUIRED_SCOPE` (default `ai:train_data`)
 - `PORT` (default `3001`)
+
+## JWKS endpoint
+
+The bridge publishes verification keys at:
+
+- `GET /.well-known/jwks.json`
+
+Response shape:
+
+```json
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "kid": "bridge-key-2026-01",
+      "alg": "RS256",
+      "use": "sig",
+      "n": "...",
+      "e": "AQAB"
+    }
+  ]
+}
+```
+
+`keys` includes the active signing key (`JWT_KID`) and any additional keys supplied via `JWT_PUBLIC_KEYS_JSON`.
+
+## JWT headers
+
+Access tokens are signed with a JOSE header that includes key id:
+
+```json
+{
+  "alg": "RS256",
+  "typ": "JWT",
+  "kid": "bridge-key-2026-01"
+}
+```
 
 ## End-to-end flow
 
@@ -72,7 +115,7 @@ The granter wallet submits contract mint directly. Contract semantics should set
 ```bash
 curl -s http://localhost:3001/nonce \
   -H 'content-type: application/json' \
-  -d '{"address":"0xGranter","purpose":"token"}'
+  -d '{"address":"0xGrantee","purpose":"token"}'
 ```
 
 ### 5) Exchange receipt for JWT
@@ -89,10 +132,10 @@ curl -s http://localhost:3001/token \
 
 Server validates:
 - SIWE signature + nonce
-- SIWE signer equals on-chain receipt granter
+- SIWE signer equals on-chain receipt grantee
 - receipt valid for required scope hash (not revoked/expired)
 
-JWT includes `receiptId`, `granter`, `grantee`, `scopeHashes`, and `exp`.
+JWT includes `sub`, `azp`, `receiptId`, `scopeHashes`, and `exp`.
 
 ### 6) Introspect
 ```bash
